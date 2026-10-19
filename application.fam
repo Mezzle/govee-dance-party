@@ -1,0 +1,14 @@
+App(
+    appid="govee_party",
+    name="Govee Party",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="govee_party_app",
+    stack_size=4 * 1024,
+    fap_category="Bluetooth",
+    fap_icon="icon.png",
+    fap_version="0.1",
+    fap_author="Martin Meredith",
+    fap_description="Dance party and B-Gone for nearby Govee BLE lights",
+    sources=["*.c"],
+    requires=["gui", "bt", "notification"],
+)

@@ -1,0 +1,7 @@
+dist/
+.vscode/
+.clang-format
+.editorconfig
+.ufbt/
+*.fap
+esp32/**/build/

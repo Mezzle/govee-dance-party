@@ -1,0 +1,99 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  flipper:
+    name: Flipper app (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: momentum
+            update_args: --index-url https://up.momentum-fw.dev/firmware/directory.json
+          - name: official
+            update_args: --channel release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ufbt
+        run: pip install ufbt
+      - name: Fetch SDK
+        run: ufbt update ${{ matrix.update_args }}
+      - name: Build
+        run: ufbt
+      - name: Collect
+        run: |
+          mkdir -p out
+          cp dist/govee_party.fap "out/govee_party-${{ matrix.name }}.fap"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flipper-${{ matrix.name }}
+          path: out/*.fap
+
+  esp32:
+    name: ESP32 image (${{ matrix.board }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [m5stack_atoms3, m5stack_atom, esp32, esp32c3, esp32s3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Install ESP32 core and NimBLE
+        run: |
+          arduino-cli config init --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+          arduino-cli lib install NimBLE-Arduino
+      - name: Build
+        run: |
+          arduino-cli compile --fqbn "esp32:esp32:${{ matrix.board }}" --warnings default --export-binaries esp32/govee_party_esp32
+          mkdir -p out
+          cp "esp32/govee_party_esp32/build/esp32.esp32.${{ matrix.board }}/govee_party_esp32.ino.merged.bin" "out/govee_party-${{ matrix.board }}.bin"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: esp32-${{ matrix.board }}
+          path: out/*.bin
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [flipper, esp32]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Release notes
+        run: |
+          cat > notes.md <<'MD'
+          ## Flipper Zero
+          - `govee_party-momentum.fap` for Momentum firmware, `govee_party-official.fap` for stock. Copy to `SD Card/apps/Bluetooth/` or install with qFlipper.
+          - Needs the ESP32 bridge on pins 13/14 (or a firmware with BLE central role, see README).
+
+          ## ESP32 / M5Stack image
+          Merged images, flash at address `0x0`:
+          ```
+          esptool.py --chip esp32s3 write_flash 0x0 govee_party-m5stack_atoms3.bin   # ATOMS3 Lite
+          esptool.py --chip esp32   write_flash 0x0 govee_party-m5stack_atom.bin     # ATOM Lite
+          ```
+          Short press = Dance Party, double = Rave, long = B-Gone, hold at power-on = Lurk. Plug into the Flipper's GPIO header to use it as the bridge.
+          MD
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: notes.md
+          files: artifacts/*
