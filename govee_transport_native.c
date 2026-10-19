@@ -200,6 +200,8 @@ GoveeTransport* govee_transport_native_alloc(void) {
     t->kind = GoveeTransportNative;
     t->last_error = NULL;
     t->impl = impl;
+    t->notify_cb = NULL;
+    t->notify_ctx = NULL;
     return t;
 }
 

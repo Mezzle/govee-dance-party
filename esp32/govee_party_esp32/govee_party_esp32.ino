@@ -17,8 +17,12 @@
  *       > R <40 hex chars> [ms]       < RX <40 hex chars> | ERR timeout   (write a read frame, wait for its AA reply)
  *                                     < NOTIFY <40 hex chars>   (unsolicited frames while subscribed)
  *       > DISC                        < OK
+ *       > BGC                         < BGC <hex> | ERR <reason>   (read the BGC-info characteristic 2b12: encryptVersion)
+ *       > SVC                         < SVC <service uuid> <char uuid> <props> per characteristic, then SVC_DONE
  *       > CENSUS [PROBE]              < CENSUS <json summary> per light, then CENSUS_DONE
  *       > DUMP                        dump and clear the LittleFS frame log on the USB port
+ *
+ *     Version 4 added BGC and SVC; everything a version 3 app sends is unchanged.
  *
  *     Wiring (Flipper GPIO header -> ESP32):
  *       Flipper 13 (TX)  -> BRIDGE_RX_PIN   (M5Stack Grove SDA, white)
@@ -107,7 +111,8 @@
 #endif
 
 #define BRIDGE_BAUD 115200
-#define BRIDGE_VERSION "3"
+#define BRIDGE_VERSION "4"
+#define SKETCH_VERSION "0.2" /* evidence "software" field */
 #define SCAN_MS 5000
 #define CONNECT_TIMEOUT_MS 6000
 #define MAX_LIGHTS 16
@@ -115,6 +120,10 @@
 #define DOUBLE_PRESS_MS 350
 #define READ_TIMEOUT_MS 1500
 #define NOTIFY_RING 8
+/* After this many unanswered core reads (power, brightness, firmware) the
+ * light is silent and the rest of the battery is skipped. */
+#define CENSUS_SILENT_AFTER 3
+#define EVIDENCE_SCHEMA "govee-evidence/1"
 
 /* Census probe writes (12 34 56 in each dialect) change the light's colour
  * and mode. Off by default; set to 1 here, or send "CENSUS PROBE". */
@@ -141,6 +150,11 @@
 static const NimBLEUUID GOVEE_SERVICE(GOVEE_SERVICE_UUID_STR);
 static const NimBLEUUID GOVEE_CONTROL(GOVEE_CONTROL_UUID_STR);
 static const NimBLEUUID GOVEE_STATUS(GOVEE_STATUS_UUID_STR);
+/* BGC-info: byte 1 (lasswellt, H1270) or byte 0 (decompiled app) carries
+ * encryptVersion 0 / 1 / 2. The census records the raw bytes. */
+static const NimBLEUUID GOVEE_BGC("00010203-0405-0607-0809-0a0b0c0d2b12");
+/* H6101 / H6104 use the generic UART service instead (SPEC 3.1). */
+static const NimBLEUUID GOVEE_ALT_SERVICE("0000ffe0-0000-1000-8000-00805f9b34fb");
 
 enum Press { PressNone, PressShort, PressDouble, PressTriple, PressLong };
 
@@ -154,8 +168,10 @@ struct Light {
     uint8_t segments; /* from AA 40 once read, else 0 = unknown */
 };
 
+enum Restored { RestoredNone, RestoredPower, RestoredFull };
+
 struct CensusResult {
-    bool connected = false, subscribed = false, silent = false;
+    bool connected = false, subscribed = false, silent = false, aborted = false;
     bool powerKnown = false, powerOn = false;
     bool brightnessKnown = false;
     uint8_t brightness = 0;
@@ -170,9 +186,18 @@ struct CensusResult {
     bool secretPresent = false;
     uint8_t secret[8] = {0};
     bool segmentPage = false;
+    uint8_t pageBefore[20] = {0};
     bool probed = false;
     uint8_t echoed = 0; /* bit (1 << GoveeDialect) */
-    uint8_t replies = 0;
+    uint8_t acks = 0; /* 33 xx application acks on the notify characteristic */
+    uint8_t reads = 0, replies = 0, badFrames = 0;
+    Restored restored = RestoredNone;
+    const char* restoreNote = nullptr;
+    /* GATT evidence, gathered on every connection including encrypted ones */
+    bool gattKnown = false;
+    bool hasService = false, hasControl = false, hasStatus = false, hasBgc = false, hasAlt = false;
+    char bgc[41] = ""; /* raw 2b12 bytes as hex, "" when unreadable */
+    uint8_t oddNotifies = 0; /* notifications that were not 20 bytes */
 };
 
 HardwareSerial flipperSerial(1);
@@ -304,17 +329,22 @@ static void uptimeIso(char out[24]) {
     snprintf(out, 24, "T+%lu.%03lu", ms / 1000, ms % 1000);
 }
 
-/* {"at","direction","frame","note","decoded","address"}: tools/govee_rig.py's shape. */
-static void logFrame(const char* direction, const uint8_t f[20], const char* note, const char* address) {
-    char at[24], hex[41], decoded[48], line[224];
+/* {"at","direction","frame","note","decoded","address"[,"redacted"]}:
+ * tools/govee_rig.py's shape. Pairing-secret bytes (AA B1 01 .. replies,
+ * 33 B2 writes) are blanked before they reach the log. */
+static void logFrame(const char* direction, const uint8_t frame[20], const char* note, const char* address) {
+    char at[24], hex[41], decoded[48], line[240];
+    uint8_t f[20];
+    memcpy(f, frame, 20);
+    bool redacted = goveeFrameRedact(f);
     uptimeIso(at);
     hex40(f, hex);
     goveeDescribe(f, direction[0] == 'r', decoded, sizeof(decoded));
     snprintf(
         line,
         sizeof(line),
-        "{\"at\":\"%s\",\"direction\":\"%s\",\"frame\":\"%s\",\"note\":\"%s\",\"decoded\":\"%s\",\"address\":\"%s\"}",
-        at, direction, hex, note, decoded, address);
+        "{\"at\":\"%s\",\"direction\":\"%s\",\"frame\":\"%s\",\"note\":\"%s\",\"decoded\":\"%s\",\"address\":\"%s\"%s}",
+        at, direction, hex, note, decoded, address, redacted ? ",\"redacted\":true" : "");
     logLine(line);
 }
 
@@ -430,9 +460,14 @@ static uint8_t ring[NOTIFY_RING][20];
 static volatile uint8_t ringHead = 0, ringTail = 0;
 static portMUX_TYPE ringMux = portMUX_INITIALIZER_UNLOCKED;
 
+static volatile uint8_t oddNotifyCount = 0; /* notifications that were not 20 bytes */
+
 static void onNotify(NimBLERemoteCharacteristic* c, uint8_t* data, size_t len, bool isNotify) {
     (void)c; (void)isNotify;
-    if(len != 20) return;
+    if(len != 20) {
+        if(oddNotifyCount < 255) oddNotifyCount++;
+        return;
+    }
     portENTER_CRITICAL(&ringMux);
     uint8_t next = (ringHead + 1) % NOTIFY_RING;
     if(next != ringTail) {
@@ -470,6 +505,7 @@ static const char* connectLight(const NimBLEAddress& addr) {
     subscribed = false;
     status = nullptr;
     ringClear();
+    oddNotifyCount = 0;
     if(!client->connect(addr, false, false)) return "connect failed";
     NimBLERemoteService* svc = client->getService(GOVEE_SERVICE);
     control = svc ? svc->getCharacteristic(GOVEE_CONTROL) : nullptr;
@@ -514,17 +550,30 @@ static bool send(const uint8_t frame[20], bool withResponse = true) {
  * during a census. */
 static const char* logAddress = "";
 static bool logging = false;
+static CensusResult* logResult = nullptr; /* the light under census, for ack / bad-frame counts */
+
+/* A frame that was not the reply to a pending read: a 33 xx ack (byte 2 == 0
+ * means accepted, SPEC 3.3), an EE push, or a late reply. */
+static void noteStray(const uint8_t f[20]) {
+    if(!goveeVerify(f)) {
+        if(logging) logFrame("rx", f, "bad_checksum", logAddress);
+        if(logResult && logResult->badFrames < 255) logResult->badFrames++;
+    } else if(f[0] == GOVEE_TYPE_WRITE) {
+        if(logging) logFrame("rx", f, f[2] == 0 ? "ack" : "ack_error", logAddress);
+        if(logResult && f[2] == 0 && logResult->acks < 255) logResult->acks++;
+    } else if(logging) {
+        logFrame("rx", f, "unsolicited", logAddress);
+    }
+    if(bridgeSession) {
+        char hex[41];
+        hex40(f, hex);
+        reply(String("NOTIFY ") + hex);
+    }
+}
 
 static void drainNotifies() {
     uint8_t f[20];
-    while(ringPop(f)) {
-        if(logging) logFrame("rx", f, "unsolicited", logAddress);
-        if(bridgeSession) {
-            char hex[41];
-            hex40(f, hex);
-            reply(String("NOTIFY ") + hex);
-        }
-    }
+    while(ringPop(f)) noteStray(f);
 }
 
 /* Writes a read request and waits for the matching AA reply. Other frames
@@ -540,21 +589,69 @@ static bool readFrame(const uint8_t req[20], uint8_t rep[20], uint32_t timeoutMs
         uint8_t f[20];
         while(ringPop(f)) {
             if(goveeReadMatches(req, f)) {
+                if(!goveeVerify(f)) {
+                    /* A corrupt reply proves the light answered, not what it said. */
+                    if(logging) logFrame("rx", f, "bad_checksum", logAddress);
+                    if(logResult && logResult->badFrames < 255) logResult->badFrames++;
+                    return false;
+                }
                 memcpy(rep, f, 20);
                 if(logging) logFrame("rx", rep, "reply", logAddress);
                 return true;
             }
-            if(logging) logFrame("rx", f, "unsolicited", logAddress);
-            if(bridgeSession) {
-                char hex[41];
-                hex40(f, hex);
-                reply(String("NOTIFY ") + hex);
-            }
+            noteStray(f);
         }
         delay(5);
     }
     if(logging) logFrame("rx", req, "timeout", logAddress);
     return false;
+}
+
+/* ----------------------------------------------------------- GATT facts */
+
+/* Reads the BGC-info characteristic (2b12) as hex. False when absent or unreadable. */
+static bool readBgc(char hex[41]) {
+    hex[0] = 0;
+    if(!client || !client->isConnected()) return false;
+    NimBLERemoteService* svc = client->getService(GOVEE_SERVICE);
+    NimBLERemoteCharacteristic* c = svc ? svc->getCharacteristic(GOVEE_BGC) : nullptr;
+    if(!c || !c->canRead()) return false;
+    NimBLEAttValue v = c->readValue();
+    size_t n = v.size() > 20 ? 20 : v.size();
+    if(n == 0) return false;
+    for(size_t i = 0; i < n; i++) snprintf(hex + i * 2, 3, "%02x", v.data()[i]);
+    return true;
+}
+
+/* One "SVC <service> <characteristic> <props>" line per characteristic. */
+static void listServices() {
+    if(!client || !client->isConnected()) return;
+    const auto& services = client->getServices(true);
+    for(auto* svc : services) {
+        const auto& chars = svc->getCharacteristics(true);
+        for(auto* c : chars) {
+            String props;
+            if(c->canRead()) props += 'r';
+            if(c->canWrite()) props += 'w';
+            if(c->canWriteNoResponse()) props += 'W';
+            if(c->canNotify()) props += 'n';
+            if(c->canIndicate()) props += 'i';
+            reply(String("SVC ") + svc->getUUID().toString().c_str() + " " + c->getUUID().toString().c_str() + " " + (props.length() ? props : String("-")));
+        }
+    }
+}
+
+/* Which of the known Govee characteristics this light exposes. */
+static void gatherGatt(CensusResult& r) {
+    if(!client || !client->isConnected()) return;
+    r.gattKnown = true;
+    NimBLERemoteService* svc = client->getService(GOVEE_SERVICE);
+    r.hasService = svc != nullptr;
+    r.hasControl = svc && svc->getCharacteristic(GOVEE_CONTROL);
+    r.hasStatus = svc && svc->getCharacteristic(GOVEE_STATUS);
+    r.hasBgc = svc && svc->getCharacteristic(GOVEE_BGC);
+    r.hasAlt = client->getService(GOVEE_ALT_SERVICE) != nullptr;
+    if(r.hasBgc) readBgc(r.bgc);
 }
 
 /* -------------------------------------------------------- bridge commands */
@@ -655,6 +752,21 @@ static void handleLine(String line) {
         }
     } else if(line.startsWith("R ")) {
         bridgeRead(line.substring(2));
+    } else if(line == "BGC") {
+        if(!bridgeSession || !connected()) {
+            reply("ERR disconnected");
+        } else {
+            char hex[41];
+            if(readBgc(hex)) reply(String("BGC ") + hex);
+            else reply("ERR no bgc");
+        }
+    } else if(line == "SVC") {
+        if(!bridgeSession || !connected()) {
+            reply("ERR disconnected");
+        } else {
+            listServices();
+            reply("SVC_DONE");
+        }
     } else if(line == "DISC") {
         disconnectLight();
         bridgeSession = false;
@@ -859,8 +971,14 @@ static void rave() {
 
 /* -------------------------------------------------------------- census */
 
+static volatile bool censusAbort = false;
 
 static bool censusRead(const uint8_t q[20], uint8_t a[20], CensusResult& r) {
+    if(censusAbort) {
+        r.aborted = true;
+        return false;
+    }
+    r.reads++;
     if(!readFrame(q, a, READ_TIMEOUT_MS)) return false;
     r.replies++;
     return true;
@@ -872,17 +990,93 @@ static void censusWrite(const uint8_t f[20], const char* note) {
     delay(150);
 }
 
+/* Probe writes: the four colour dialects, each with its own colour, each
+ * judged only by its own colour appearing where it was not before. Mirrors
+ * govee_census.c in the Flipper app. */
+static void censusProbe(CensusResult& r) {
+    uint8_t q[20], a[20], f[20];
+    r.probed = true;
+    uint8_t segments = (r.icKnown && r.segments) ? r.segments : 0;
+    if(r.powerKnown && !r.powerOn) {
+        goveePower(f, true);
+        censusWrite(f, "probe");
+    }
+    uint8_t page[20];
+    bool havePage = r.segmentPage;
+    if(havePage) memcpy(page, r.pageBefore, 20);
+    uint8_t lastModeRgb[3] = {0, 0, 0};
+    bool haveModeRgb = r.submodeKnown && goveeSubmodeIsColor(r.submode);
+    if(haveModeRgb) memcpy(lastModeRgb, r.modeBody, 3);
+
+    static const GoveeDialect order[] = {GoveeLegacy, GoveeDreamcolor, GoveeRgbww, GoveeRgbic};
+    for(GoveeDialect d : order) {
+        if(censusAbort) break;
+        uint8_t want = goveeDialectSubmode(d), rgb[3];
+        goveeProbeColor(d, rgb);
+        bool stalePage = havePage && goveeReplySegmentPageHas(page, rgb[0], rgb[1], rgb[2]);
+        bool staleMode = haveModeRgb && memcmp(lastModeRgb, rgb, 3) == 0;
+        goveeRgbSeg(f, rgb[0], rgb[1], rgb[2], d, segments);
+        censusWrite(f, "probe");
+        bool echoed = false;
+        goveeReadMode(q);
+        if(censusRead(q, a, r) && a[2] == want) {
+            if((d == GoveeLegacy || d == GoveeRgbww) && !staleMode) {
+                echoed = a[3] == rgb[0] && a[4] == rgb[1] && a[5] == rgb[2];
+            }
+            haveModeRgb = goveeSubmodeIsColor(a[2]);
+            memcpy(lastModeRgb, a + 3, 3);
+        }
+        goveeReadSegmentColors(q, 1);
+        if(censusRead(q, a, r)) {
+            if(goveeReplySegmentPageHas(a, rgb[0], rgb[1], rgb[2]) && !stalePage) echoed = true;
+            memcpy(page, a, 20);
+            havePage = true;
+        }
+        if(echoed) r.echoed |= (uint8_t)(1u << d);
+    }
+
+    /* Restore: colour only when the pre-probe mode reply named it (02 / 0D). */
+    if(r.submodeKnown && (r.submode == GOVEE_SUBMODE_COLOR_LEGACY || r.submode == GOVEE_SUBMODE_COLOR_RGBWW)) {
+        GoveeDialect od = r.submode == GOVEE_SUBMODE_COLOR_LEGACY ? GoveeLegacy : GoveeRgbww;
+        goveeRgbSeg(f, r.modeBody[0], r.modeBody[1], r.modeBody[2], od, segments);
+        censusWrite(f, "restore");
+        r.restored = RestoredFull;
+        r.restoreNote = (r.echoed & (1u << od)) ? nullptr : "colour rewritten in the reported dialect, which did not echo";
+    } else if(r.submodeKnown && goveeSubmodeIsColor(r.submode)) {
+        r.restored = RestoredPower;
+        r.restoreNote = "pre-probe colour not readable from the mode reply (0B/15); left on the last probe colour";
+    } else if(r.submodeKnown) {
+        r.restored = RestoredPower;
+        r.restoreNote = "pre-probe mode was not a static colour; not rewritten";
+    } else {
+        r.restored = RestoredPower;
+        r.restoreNote = "pre-probe mode unknown; left on the last probe colour";
+    }
+    if(r.powerKnown) {
+        goveePower(f, r.powerOn);
+        censusWrite(f, "restore");
+    } else {
+        r.restored = RestoredNone;
+        r.restoreNote = "pre-probe power unknown; nothing restored";
+    }
+}
+
 /* Same battery and order as govee_census.c in the Flipper app. */
 static void censusRun(bool probe, CensusResult& r) {
     uint8_t q[20], a[20];
+    uint8_t coreTimeouts = 0;
     goveeReadPower(q);
-    if(censusRead(q, a, r)) { r.powerKnown = true; r.powerOn = a[2] != 0; }
+    if(censusRead(q, a, r)) { r.powerKnown = true; r.powerOn = a[2] != 0; } else coreTimeouts++;
     goveeReadBrightness(q);
-    if(censusRead(q, a, r)) { r.brightnessKnown = true; r.brightness = a[2]; }
+    if(censusRead(q, a, r)) { r.brightnessKnown = true; r.brightness = a[2]; } else coreTimeouts++;
+    goveeReadFirmware(q);
+    if(censusRead(q, a, r)) goveeReplyVersionString(a, r.firmware, sizeof(r.firmware)); else coreTimeouts++;
+    if(coreTimeouts >= CENSUS_SILENT_AFTER && r.replies == 0) {
+        r.silent = !r.aborted; /* locked, encrypted or foreign dialect: stop early */
+        return;
+    }
     goveeReadMode(q);
     if(censusRead(q, a, r)) { r.submodeKnown = true; r.submode = a[2]; memcpy(r.modeBody, a + 3, 4); }
-    goveeReadFirmware(q);
-    if(censusRead(q, a, r)) goveeReplyVersionString(a, r.firmware, sizeof(r.firmware));
     goveeReadHardware(q);
     if(censusRead(q, a, r)) goveeReplyVersionString(a, r.hardware, sizeof(r.hardware));
     goveeReadIcCount(q);
@@ -892,39 +1086,17 @@ static void censusRun(bool probe, CensusResult& r) {
     goveeReadSecret(q);
     if(censusRead(q, a, r) && a[2] == 0x01) { r.secretPresent = true; memcpy(r.secret, a + 3, 8); }
     goveeReadSegmentColors(q, 1);
-    if(censusRead(q, a, r)) r.segmentPage = true;
-    r.silent = r.replies == 0;
-
-    if(probe && !r.silent) {
-        r.probed = true;
-        uint8_t segments = (r.icKnown && r.segments) ? r.segments : 0;
-        static const GoveeDialect order[] = {GoveeLegacy, GoveeDreamcolor, GoveeRgbww, GoveeRgbic};
-        for(GoveeDialect d : order) {
-            uint8_t want = goveeDialectSubmode(d), f[20];
-            goveeRgbSeg(f, GOVEE_PROBE_R, GOVEE_PROBE_G, GOVEE_PROBE_B, d, segments);
-            censusWrite(f, "probe");
-            bool echoed = false;
-            goveeReadMode(q);
-            if(censusRead(q, a, r) && a[2] == want && (d == GoveeLegacy || d == GoveeRgbww)) {
-                echoed = a[3] == GOVEE_PROBE_R && a[4] == GOVEE_PROBE_G && a[5] == GOVEE_PROBE_B;
-            }
-            goveeReadSegmentColors(q, 1);
-            if(censusRead(q, a, r) && goveeReplySegmentPageHas(a, GOVEE_PROBE_R, GOVEE_PROBE_G, GOVEE_PROBE_B)) echoed = true;
-            if(echoed) r.echoed |= (uint8_t)(1u << d);
-        }
-        if(r.powerKnown) {
-            goveePower(q, r.powerOn);
-            censusWrite(q, "restore");
-        }
-    }
+    if(censusRead(q, a, r)) { r.segmentPage = true; memcpy(r.pageBefore, a, 20); }
+    r.silent = r.replies == 0 && !r.aborted;
+    if(probe && !r.silent && !r.aborted) censusProbe(r);
 }
 
 static void jsonStr(String& s, const char* key, const char* v) {
     if(s.length() > 1) s += ',';
     s += '"'; s += key; s += "\":\"";
     for(const char* p = v; *p; p++) {
-        if(*p == '"' || *p == '\\') s += '\\';
         if((unsigned char)*p < 0x20) continue;
+        if(*p == '"' || *p == '\\') s += '\\';
         s += *p;
     }
     s += '"';
@@ -935,15 +1107,20 @@ static void jsonRaw(String& s, const char* key, const String& v) {
 }
 static void jsonBool(String& s, const char* key, bool v) { jsonRaw(s, key, v ? "true" : "false"); }
 
+/* Same keys as govee_census_summary_json() in the Flipper app (govee-evidence/1). */
 static String censusSummary(const Light& l, const CensusResult& r, const char* addr, bool printSecret) {
     String s = "{";
     char at[24];
     uptimeIso(at);
     jsonStr(s, "summary", "light");
+    jsonStr(s, "schema", EVIDENCE_SCHEMA);
+    jsonStr(s, "source", "esp32");
     jsonStr(s, "at", at);
+    jsonStr(s, "software", "govee-party-esp32 " SKETCH_VERSION " bridge " BRIDGE_VERSION);
     jsonStr(s, "address", addr);
     jsonStr(s, "name", l.name);
     jsonStr(s, "model", l.model);
+    jsonBool(s, "known_model", goveeModelKnown(l.model));
     jsonRaw(s, "rssi", String(l.rssi));
     if(l.adv.valid) {
         jsonStr(s, "pact", (String(l.adv.pactType) + "/" + String(l.adv.pactCode)).c_str());
@@ -955,10 +1132,27 @@ static String censusSummary(const Light& l, const CensusResult& r, const char* a
         jsonRaw(s, "encrypted", "null");
     }
     jsonStr(s, "dialect", goveeDialectName(l.dialect));
+    jsonStr(s, "dialect_source", goveeDialectSource(l.model, l.adv));
     jsonBool(s, "secret_family", goveeNeedsSecret(l.model));
     jsonBool(s, "connected", r.connected);
     jsonBool(s, "subscribed", r.subscribed);
     jsonBool(s, "silent", r.connected && r.silent);
+    if(r.aborted) jsonBool(s, "aborted", true);
+    if(r.gattKnown) {
+        String g;
+        if(r.hasService) g += "1910";
+        if(r.hasControl) g += "/2b11";
+        if(r.hasStatus) g += "/2b10";
+        if(r.hasBgc) g += "/2b12";
+        if(r.hasAlt) g += (g.length() ? "+" : "") + String("ffe0");
+        jsonStr(s, "gatt", g.length() ? g.c_str() : "none");
+        if(r.bgc[0]) jsonStr(s, "bgc", r.bgc);
+    }
+    jsonRaw(s, "reads", String(r.reads));
+    jsonRaw(s, "replies", String(r.replies));
+    if(r.badFrames) jsonRaw(s, "bad_frames", String(r.badFrames));
+    if(r.acks) jsonRaw(s, "acks", String(r.acks));
+    if(r.oddNotifies) jsonRaw(s, "odd_notifies", String(r.oddNotifies));
     if(r.powerKnown) jsonBool(s, "power", r.powerOn);
     if(r.brightnessKnown) jsonRaw(s, "brightness", String(r.brightness));
     if(r.submodeKnown) {
@@ -991,6 +1185,8 @@ static String censusSummary(const Light& l, const CensusResult& r, const char* a
             e += b;
         }
         jsonStr(s, "echoed", e.c_str());
+        jsonStr(s, "restored", r.restored == RestoredFull ? "full" : r.restored == RestoredPower ? "power" : "none");
+        if(r.restoreNote) jsonStr(s, "restore_note", r.restoreNote);
     }
     s += '}';
     return s;
@@ -1000,39 +1196,52 @@ static void census(bool probe) {
     led(60, 40, 0);
     logOpen();
     logging = true;
+    censusAbort = false;
     {
-        String head = "{\"summary\":\"census\",\"lights\":" + String(lightCount) + ",\"probe\":" + (probe ? "true" : "false") + "}";
+        String head = String("{\"summary\":\"session\",\"schema\":\"" EVIDENCE_SCHEMA "\",\"source\":\"esp32\",\"software\":\"govee-party-esp32 " SKETCH_VERSION " bridge " BRIDGE_VERSION "\",\"board\":\"" ARDUINO_BOARD "\",\"lights\":") +
+                      String(lightCount) + ",\"probe\":" + (probe ? "true" : "false") + "}";
         logLine(head.c_str());
     }
-    for(size_t i = 0; i < lightCount; i++) {
+    for(size_t i = 0; i < lightCount && !censusAbort; i++) {
         Light& l = lights[i];
         std::string addrStr = l.addr.toString();
         logAddress = addrStr.c_str();
         CensusResult r;
+        logResult = &r;
         Serial.printf("census %u/%u %s\n", (unsigned)i + 1, (unsigned)lightCount, l.name);
-        if(l.adv.encrypted) {
-            /* AES-wrapped link: plaintext frames are useless, do not connect. */
-        } else if(connectLight(l.addr) == nullptr) {
+        if(connectLight(l.addr) == nullptr) {
             r.connected = true;
-            if(subscribeStatus() == nullptr) {
+            gatherGatt(r);
+            if(l.adv.encrypted) {
+                /* AES-wrapped link: plaintext frames are useless. The GATT
+                 * table and the 2b12 bytes are the evidence; no frames sent. */
+            } else if(subscribeStatus() == nullptr) {
                 r.subscribed = true;
                 censusRun(probe, r);
                 if(r.icKnown && r.segments) l.segments = r.segments;
             }
+            r.oddNotifies = oddNotifyCount;
             disconnectLight();
         } else {
             ledError();
             led(60, 40, 0);
         }
+        logResult = nullptr;
         String summary = censusSummary(l, r, addrStr.c_str(), CENSUS_PRINT_SECRET);
         logLine(summary.c_str());
         if(censusToBridge) reply("CENSUS " + summary);
         logAddress = "";
+        /* A button press between lights stops the census; PING still answers. */
+        serviceSerial();
+        if(buttonDown()) {
+            censusAbort = true;
+            while(buttonDown()) delay(10);
+        }
         delay(150);
     }
     logging = false;
     logClose();
-    Serial.printf("census done: %u light(s)\n", (unsigned)lightCount);
+    Serial.printf("census done: %u light(s)%s\n", (unsigned)lightCount, censusAbort ? " (stopped)" : "");
     ledIdle();
 }
 

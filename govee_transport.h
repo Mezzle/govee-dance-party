@@ -81,6 +81,13 @@ bool govee_transport_read(
 
 const char* govee_transport_last_error(GoveeTransport* transport);
 
+/* Frames the light pushed on the status characteristic that were not the
+ * reply to a pending read: 33 xx write acks, EE xx pushes, late replies.
+ * Delivered from inside read()/write() calls on the worker thread; NULL
+ * clears it. Backends without a read path never call it. */
+typedef void (*GoveeNotifyCallback)(const uint8_t frame[GOVEE_FRAME_LEN], void* context);
+void govee_transport_set_notify_callback(GoveeTransport* transport, GoveeNotifyCallback cb, void* context);
+
 /* Implementation detail shared by the two backends. */
 typedef struct {
     bool (*scan)(
@@ -107,6 +114,8 @@ struct GoveeTransport {
     GoveeTransportKind kind;
     const char* last_error;
     void* impl;
+    GoveeNotifyCallback notify_cb;
+    void* notify_ctx;
 };
 
 /* Backend constructors (return NULL on failure). */

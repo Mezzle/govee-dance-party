@@ -86,6 +86,8 @@ static void uart_flush(UartImpl* impl) {
     }
 }
 
+static void uart_handle_notify(GoveeTransport* t, const char* line);
+
 /* Sends a command and waits for OK / ERR. */
 static bool uart_command(GoveeTransport* t, const char* cmd, uint32_t timeout_ms) {
     UartImpl* impl = t->impl;
@@ -100,10 +102,25 @@ static bool uart_command(GoveeTransport* t, const char* cmd, uint32_t timeout_ms
             t->last_error = reply + (reply[3] == ' ' ? 4 : 3);
             return false;
         }
-        /* ignore chatter such as late ADV lines */
+        uart_handle_notify(t, reply);
+        /* ignore other chatter such as late ADV lines */
     }
     t->last_error = "Bridge timeout";
     return false;
+}
+
+/* "NOTIFY <40 hex>" lines arrive whenever the light pushes a frame while
+ * the bridge is subscribed. Hand them to the app's callback, if any. */
+static void uart_handle_notify(GoveeTransport* t, const char* line) {
+    if(!t->notify_cb || strncmp(line, "NOTIFY ", 7) != 0) return;
+    if(strlen(line + 7) < GOVEE_FRAME_LEN * 2) return;
+    uint8_t frame[GOVEE_FRAME_LEN];
+    for(int i = 0; i < GOVEE_FRAME_LEN; i++) {
+        unsigned v;
+        if(sscanf(line + 7 + i * 2, "%2x", &v) != 1) return;
+        frame[i] = (uint8_t)v;
+    }
+    t->notify_cb(frame, t->notify_ctx);
 }
 
 static bool parse_mac(const char* s, uint8_t out[6]) {
@@ -279,7 +296,7 @@ static bool uart_read(GoveeTransport* t, const uint8_t* request, uint8_t* reply,
             if(strncmp(t->last_error, "disconnected", 12) == 0) impl->connected = false;
             return false;
         }
-        /* NOTIFY and other chatter: ignore */
+        uart_handle_notify(t, line);
     }
     t->last_error = "Bridge timeout";
     return false;
@@ -337,6 +354,8 @@ GoveeTransport* govee_transport_uart_alloc(void) {
     t->kind = GoveeTransportUart;
     t->last_error = NULL;
     t->impl = impl;
+    t->notify_cb = NULL;
+    t->notify_ctx = NULL;
 
     /* Give a freshly powered bridge a moment, then check it answers. */
     bool alive = false;

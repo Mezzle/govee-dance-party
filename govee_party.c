@@ -22,6 +22,10 @@
 #define CENSUS_DIR  EXT_PATH("apps_data/govee_party")
 #define CENSUS_FILE CENSUS_DIR "/census.jsonl"
 #define CENSUS_TEXT_MAX 2048
+#define APP_VERSION "0.2" /* keep in step with application.fam fap_version */
+/* The census path nests snprintf-heavy logging inside the transport calls;
+ * give the worker more headroom than the party needs. */
+#define WORKER_STACK_BYTES (4 * 1024)
 
 typedef enum {
     ViewMenu,
@@ -98,6 +102,7 @@ typedef struct {
 
     /* census */
     char* census_text; /* results for the widget, CENSUS_TEXT_MAX */
+    char* census_json; /* one summary line, GOVEE_CENSUS_JSON_MAX */
     File* census_file;
 
     /* worker */
@@ -462,6 +467,7 @@ typedef struct {
     App* app;
     const GoveeLight* light;
     char addr[18];
+    GoveeCensusResult* result;
 } CensusCtx;
 
 static bool census_io_write(void* ctx, const uint8_t* frame) {
@@ -479,26 +485,35 @@ static void census_io_delay(void* ctx, uint32_t ms) {
     furi_delay_ms(ms);
 }
 
-/* One JSON line per frame in the bench rig's shape:
- * {"at","direction","frame","note","decoded","address"} */
-static void census_io_log(void* ctx, const char* direction, const uint8_t* frame, const char* note) {
+/* One JSON line per frame in the bench rig's shape, plus "redacted" when the
+ * secret bytes were blanked (govee-evidence/1 keeps the rig's six keys):
+ * {"at","direction","frame","note","decoded","address"[,"redacted"]} */
+static void census_io_log(void* ctx, const char* direction, const uint8_t* frame, const char* note, bool redacted) {
     CensusCtx* c = ctx;
     if(!c->app->census_file) return;
-    char at[24], hex[GOVEE_FRAME_LEN * 2 + 1], decoded[48], line[224];
+    char at[24], hex[GOVEE_FRAME_LEN * 2 + 1], decoded[48], line[240];
     census_timestamp(at);
     for(int i = 0; i < GOVEE_FRAME_LEN; i++) snprintf(hex + i * 2, 3, "%02x", frame[i]);
     govee_frame_describe(frame, direction[0] == 'r', decoded, sizeof(decoded));
     snprintf(
         line,
         sizeof(line),
-        "{\"at\":\"%s\",\"direction\":\"%s\",\"frame\":\"%s\",\"note\":\"%s\",\"decoded\":\"%s\",\"address\":\"%s\"}",
+        "{\"at\":\"%s\",\"direction\":\"%s\",\"frame\":\"%s\",\"note\":\"%s\",\"decoded\":\"%s\",\"address\":\"%s\"%s}",
         at,
         direction,
         hex,
         note,
         decoded,
-        c->addr);
+        c->addr,
+        redacted ? ",\"redacted\":true" : "");
     census_file_line(c->app, line);
+}
+
+/* Frames the bridge saw that were not read replies: write acks and pushes. */
+static void census_on_notify(const uint8_t frame[GOVEE_FRAME_LEN], void* context) {
+    CensusCtx* c = context;
+    GoveeCensusIo io = {.ctx = c, .log = census_io_log};
+    govee_census_note_notify(&io, frame, c->result);
 }
 
 static void census_append_text(App* app, const char* text) {
@@ -523,9 +538,29 @@ static void worker_census(App* app) {
     bool can_read = govee_transport_can_read(app->transport);
     if(!can_read) census_append_text(app, "\e#No read path\nThis radio cannot subscribe;\nadvertisements only.\n\n");
 
+    char at[24];
+    census_timestamp(at);
+    {
+        /* Session header: who gathered the evidence and with what. */
+        char head[200];
+        snprintf(
+            head,
+            sizeof(head),
+            "{\"summary\":\"session\",\"schema\":\"%s\",\"source\":\"dance_party\",\"at\":\"%s\",\"software\":\"govee-dance-party %s\",\"transport\":\"%s\",\"lights\":%u,\"probe\":%s}",
+            GOVEE_CENSUS_SCHEMA,
+            at,
+            APP_VERSION,
+            govee_transport_kind_name(app->transport_kind),
+            (unsigned)app->light_count,
+            app->census_probe ? "true" : "false");
+        census_file_line(app, head);
+    }
+
     for(size_t i = 0; i < app->light_count && !app->stop; i++) {
         const GoveeLight* light = &app->lights[i];
-        CensusCtx ctx = {.app = app, .light = light};
+        GoveeCensusResult r;
+        memset(&r, 0, sizeof(r));
+        CensusCtx ctx = {.app = app, .light = light, .result = &r};
         snprintf(
             ctx.addr,
             sizeof(ctx.addr),
@@ -541,32 +576,41 @@ static void worker_census(App* app) {
         status_set(app, "Census", l1, light->name, "Back = stop");
         status_progress(app, (uint8_t)(i * 100 / app->light_count));
 
-        GoveeCensusResult r;
-        memset(&r, 0, sizeof(r));
         if(light->adv.valid && light->adv.encrypted) {
             /* An AES-wrapped link ignores plaintext frames; do not bother. */
         } else if(govee_transport_connect(app->transport, light, 6000)) {
             r.connected = true;
             if(can_read && govee_transport_subscribe(app->transport)) {
                 r.subscribed = true;
+                govee_transport_set_notify_callback(app->transport, census_on_notify, &ctx);
                 GoveeCensusIo io = {
                     .ctx = &ctx,
                     .write = census_io_write,
                     .read = census_io_read,
                     .delay_ms = census_io_delay,
                     .log = census_io_log,
+                    .abort = &app->stop,
                 };
                 govee_census_run(&io, light->model, app->census_probe, &r);
+                govee_transport_set_notify_callback(app->transport, NULL, NULL);
             }
             govee_transport_disconnect(app->transport);
         } else {
             FURI_LOG_W(TAG, "%s: %s", light->name, govee_transport_last_error(app->transport));
         }
 
-        char json[512];
-        govee_census_summary_json(ctx.addr, light->name, light->model, &light->adv, light->rssi, &r, false, json, sizeof(json));
-        census_file_line(app, json);
-        FURI_LOG_I(TAG, "%s", json);
+        census_timestamp(at);
+        GoveeCensusMeta meta = {
+            .source = "dance_party",
+            .at = at,
+            .software = "govee-dance-party " APP_VERSION,
+            .dialect = light->dialect,
+            .dialect_source = govee_census_dialect_source(light->model, &light->adv),
+        };
+        govee_census_summary_json(
+            ctx.addr, light->name, light->model, &light->adv, light->rssi, &r, &meta, false, app->census_json, GOVEE_CENSUS_JSON_MAX);
+        census_file_line(app, app->census_json);
+        FURI_LOG_I(TAG, "%s", app->census_json);
 
         char brief[48], pact[20], block[200];
         govee_census_summary_short(&r, brief, sizeof(brief));
@@ -578,9 +622,10 @@ static void worker_census(App* app) {
         snprintf(
             block,
             sizeof(block),
-            "\e#%s %s\n%s\n%s %ddB\n%s%s%s\n\n",
+            "\e#%s %s%s\n%s\n%s %ddB\n%s%s%s\n\n",
             light->model,
             govee_dialect_name(light->dialect),
+            govee_model_known(light->model) ? "" : " (unknown)",
             light->name,
             pact,
             light->rssi,
@@ -686,7 +731,7 @@ static void worker_start(App* app, Job job) {
     furi_check(app->worker == NULL);
     app->job = job;
     app->stop = false;
-    app->worker = furi_thread_alloc_ex("GoveeWorker", 3 * 1024, worker_thread, app);
+    app->worker = furi_thread_alloc_ex("GoveeWorker", WORKER_STACK_BYTES, worker_thread, app);
     furi_thread_start(app->worker);
 }
 
@@ -871,6 +916,7 @@ static App* app_alloc(void) {
     app->census_probe = false;
     app->census_text = malloc(CENSUS_TEXT_MAX);
     app->census_text[0] = '\0';
+    app->census_json = malloc(GOVEE_CENSUS_JSON_MAX);
     app->pattern = PatternRainbow;
     app->speed = 3;
     app->led_msg[0].type = NotificationMessageTypeLedRed;
@@ -957,6 +1003,7 @@ static void app_free(App* app) {
     view_dispatcher_remove_view(app->dispatcher, ViewCensus);
     widget_free(app->census_view);
     free(app->census_text);
+    free(app->census_json);
     submenu_free(app->menu);
     submenu_free(app->pick);
     view_free(app->status);

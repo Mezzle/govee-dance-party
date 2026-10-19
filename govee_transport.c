@@ -107,6 +107,12 @@ const char* govee_transport_last_error(GoveeTransport* transport) {
     return (transport && transport->last_error) ? transport->last_error : "";
 }
 
+void govee_transport_set_notify_callback(GoveeTransport* transport, GoveeNotifyCallback cb, void* context) {
+    furi_check(transport);
+    transport->notify_cb = cb;
+    transport->notify_ctx = context;
+}
+
 bool govee_light_list_add(
     GoveeLight* lights,
     size_t max,
