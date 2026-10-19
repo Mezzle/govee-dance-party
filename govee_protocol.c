@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <ctype.h>
 
 const uint8_t GOVEE_SERVICE_UUID_LE[16] = {
@@ -374,7 +375,12 @@ bool govee_adv_parse_mfr(const uint8_t* data, size_t len, GoveeAdvInfo* out) {
 
 /* ---------------------------------------------------------- model table */
 
-static const char* const GOVEE_NAME_PREFIXES[] = {"ihoment_", "Govee_", "Minger_", "GBK_", "GVH", "GVR"};
+/* Advertised-name rules from the app's BaseBleProcessor (SPEC 18.2):
+ *   ihoment_ / Govee_ / Minger_ / GBK_   split on '_'   -> "ihoment_H6159_1A2B"
+ *   GVH / GVR                           substring(2)   -> "GVH6159_1A2B", "GVH600B4F5A"
+ * so for the GV* forms the SKU letter is the third character of the name,
+ * not a separate 'H' after the prefix. */
+static const char* const GOVEE_NAME_PREFIXES[] = {"ihoment_", "Govee_", "Minger_", "GBK_", "GV"};
 
 bool govee_name_parse(const char* name, size_t name_len, char* model, size_t model_size) {
     if(!name || name_len == 0 || model_size < 6) return false;
@@ -384,13 +390,18 @@ bool govee_name_parse(const char* name, size_t name_len, char* model, size_t mod
         if(name_len < plen + 5) continue;
         if(strncasecmp(name, prefix, plen) != 0) continue;
         const char* sku = name + plen;
-        if(toupper((unsigned char)sku[0]) != 'H') continue;
+        char letter = (char)toupper((unsigned char)sku[0]);
+        /* Lights are H-prefixed SKUs; the GV form also carries sensors (GVR...). */
+        if(letter != 'H') continue;
         bool ok = true;
         for(size_t k = 1; k < 5; k++) {
             if(!isalnum((unsigned char)sku[k])) ok = false;
         }
         if(!ok) continue;
-        if(name_len > plen + 5 && sku[5] != '_') continue;
+        /* "ihoment_H6159_1A2B" needs the '_' after the SKU; the GV form is
+         * "GVH6159_1A2B" or, on some SKUs, "GVH600B4F5A" with no separator. */
+        bool gv_form = plen == 2;
+        if(!gv_form && name_len > plen + 5 && sku[5] != '_') continue;
         for(size_t k = 0; k < 5; k++) model[k] = (char)toupper((unsigned char)sku[k]);
         model[5] = '\0';
         return true;
@@ -427,6 +438,17 @@ static const char* const DREAMCOLOR_MODELS[] = {
 
 /* Verified on hardware (H6181, fw 2.03.11): RGBWW 0x0D dialect, brightness 0-100. */
 static const char* const RGBWW_MODELS[] = {"H6181"};
+
+/* The classic Telink-era 0x02 strips, as tabled by the Home Assistant
+ * integration (models.py LEGACY_RGB_MODELS). Only the H6159 is hardware
+ * verified; the list exists so the census can tell "known legacy" from
+ * "never heard of it", both of which get 0x02 by default. */
+static const char* const LEGACY_MODELS[] = {
+    "H6159", "H6110", "H6109", "H614A", "H614B", "H614E", "H6127", "H6107", "H6116", "H6161",
+    "H6129", "H6139", "H6141", "H6142", "H6104", "H6117", "H6125", "H6126", "H6135", "H6137",
+    "H6138", "H6160", "H6163", "H6170", "H6171", "H6172", "H6182", "H6188", "H6195", "H7020",
+    "H7021",
+};
 
 /* Families tagged secret_key_pairing (SPEC 10.1): dreamcolorlightv1, h61d3,
  * stringlightv2, hollowlamp, h60ax, h6047. SKUs that also sit in an untagged
@@ -468,6 +490,15 @@ bool govee_model_needs_secret(const char* model) {
     return model && IN_TABLE(model, SECRET_MODELS);
 }
 
+bool govee_model_known(const char* model) {
+    return model && (IN_TABLE(model, RGBIC_MODELS) || IN_TABLE(model, DREAMCOLOR_MODELS) ||
+                     IN_TABLE(model, RGBWW_MODELS) || IN_TABLE(model, LEGACY_MODELS));
+}
+
+bool govee_model_is_dreamcolor(const char* model) {
+    return model && IN_TABLE(model, DREAMCOLOR_MODELS);
+}
+
 const char* govee_dialect_name(GoveeDialect dialect) {
     switch(dialect) {
     case GoveeDialectRgbic:
@@ -488,6 +519,32 @@ uint8_t govee_dialect_submode(GoveeDialect dialect) {
     case GoveeDialectRgbww: return GOVEE_SUBMODE_COLOR_RGBWW;
     default: return GOVEE_SUBMODE_COLOR_LEGACY;
     }
+}
+
+void govee_probe_color(GoveeDialect dialect, uint8_t rgb[3]) {
+    /* Distinct per dialect; see the GOVEE_PROBE_* comment in the header. */
+    switch(dialect) {
+    case GoveeDialectRgbww: rgb[0] = 0x13; rgb[1] = 0x35; rgb[2] = 0x57; break;
+    case GoveeDialectRgbic: rgb[0] = 0x14; rgb[1] = 0x36; rgb[2] = 0x58; break;
+    case GoveeDialectDreamcolor: rgb[0] = 0x15; rgb[1] = 0x37; rgb[2] = 0x59; break;
+    default: rgb[0] = GOVEE_PROBE_R; rgb[1] = GOVEE_PROBE_G; rgb[2] = GOVEE_PROBE_B; break;
+    }
+}
+
+/* ------------------------------------------------------ evidence hygiene */
+
+bool govee_frame_has_secret(const uint8_t frame[GOVEE_FRAME_LEN]) {
+    if(frame[0] == GOVEE_TYPE_READ && frame[1] == GOVEE_CMD_SECRET_READ && frame[2] == 0x01) return true;
+    if(frame[0] == GOVEE_TYPE_WRITE && frame[1] == GOVEE_CMD_SECRET_WRITE) return true;
+    return false;
+}
+
+bool govee_frame_redact(uint8_t frame[GOVEE_FRAME_LEN]) {
+    if(!govee_frame_has_secret(frame)) return false;
+    size_t from = frame[0] == GOVEE_TYPE_READ ? 3 : 2;
+    memset(&frame[from], 0, GOVEE_FRAME_LEN - 1 - from);
+    frame[GOVEE_FRAME_LEN - 1] = govee_checksum(frame, GOVEE_FRAME_LEN - 1);
+    return true;
 }
 
 void govee_hsv_to_rgb(uint16_t h, uint8_t s, uint8_t v, uint8_t* r, uint8_t* g, uint8_t* b) {

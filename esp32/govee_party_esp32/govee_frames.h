@@ -51,6 +51,9 @@
 
 #define GOVEE_SCENE_BLINKING 0x08
 
+/* Legacy-dialect probe colour; goveeProbeColor() gives the others (one per
+ * dialect so a colour that landed through one dialect cannot be mistaken
+ * for an echo of the next). */
 #define GOVEE_PROBE_R 0x12
 #define GOVEE_PROBE_G 0x34
 #define GOVEE_PROBE_B 0x56
@@ -367,20 +370,24 @@ static inline bool goveeParseMfr(const uint8_t* data, size_t len, GoveeAdvInfo& 
 
 /* ---------------------------------------------------------- model table */
 
-static const char* const GOVEE_PREFIXES[] = {"ihoment_", "Govee_", "Minger_", "GBK_", "GVH", "GVR"};
+/* App rule (BaseBleProcessor): ihoment_/Govee_/Minger_/GBK_ split on '_';
+ * GVH/GVR take substring(2), so the SKU letter is the third character
+ * ("GVH6159_1A2B", "GVH600B4F5A" with no separator). */
+static const char* const GOVEE_PREFIXES[] = {"ihoment_", "Govee_", "Minger_", "GBK_", "GV"};
 
-/* "ihoment_H6159_1A2B" -> "H6159". Returns false if not a Govee name. */
+/* "ihoment_H6159_1A2B" -> "H6159". Returns false if not a Govee light. */
 static inline bool goveeParseName(const char* name, char model[6]) {
     size_t len = strlen(name);
     for(auto prefix : GOVEE_PREFIXES) {
         size_t plen = strlen(prefix);
         if(len < plen + 5 || strncasecmp(name, prefix, plen) != 0) continue;
         const char* sku = name + plen;
-        if(toupper((unsigned char)sku[0]) != 'H') continue;
+        if(toupper((unsigned char)sku[0]) != 'H') continue; /* GVR... are sensors */
         bool ok = true;
         for(int k = 1; k < 5; k++) if(!isalnum((unsigned char)sku[k])) ok = false;
         if(!ok) continue;
-        if(len > plen + 5 && sku[5] != '_') continue;
+        bool gvForm = plen == 2;
+        if(!gvForm && len > plen + 5 && sku[5] != '_') continue;
         for(int k = 0; k < 5; k++) model[k] = (char)toupper((unsigned char)sku[k]);
         model[5] = 0;
         return true;
@@ -408,6 +415,15 @@ static const char* const GOVEE_DREAMCOLOR[] = {
     "H70A2", "H70A3"};
 
 static const char* const GOVEE_RGBWW[] = {"H6181"};
+
+/* Telink-era 0x02 strips as tabled by the HA integration (models.py
+ * LEGACY_RGB_MODELS); only the H6159 is hardware verified. Lets the census
+ * tell "known legacy" from "never heard of it". */
+static const char* const GOVEE_LEGACY[] = {
+    "H6159", "H6110", "H6109", "H614A", "H614B", "H614E", "H6127", "H6107", "H6116", "H6161",
+    "H6129", "H6139", "H6141", "H6142", "H6104", "H6117", "H6125", "H6126", "H6135", "H6137",
+    "H6138", "H6160", "H6163", "H6170", "H6171", "H6172", "H6182", "H6188", "H6195", "H7020",
+    "H7021"};
 
 /* secret_key_pairing families (SPEC 10.1), minus SKUs that also sit in an
  * untagged legacy family. */
@@ -437,6 +453,22 @@ static inline bool goveeNeedsSecret(const char* model) {
     return goveeInTable(model, GOVEE_SECRET);
 }
 
+static inline bool goveeModelKnown(const char* model) {
+    return goveeInTable(model, GOVEE_RGBIC) || goveeInTable(model, GOVEE_DREAMCOLOR) ||
+           goveeInTable(model, GOVEE_RGBWW) || goveeInTable(model, GOVEE_LEGACY);
+}
+
+static inline bool goveeModelIsDreamcolor(const char* model) {
+    return goveeInTable(model, GOVEE_DREAMCOLOR);
+}
+
+/* "pact" when the advertised pact decided, "table" for a tabled SKU, else "default". */
+static inline const char* goveeDialectSource(const char* model, const GoveeAdvInfo& adv) {
+    if(adv.valid && goveeModelIsDreamcolor(model)) return "pact";
+    if(goveeModelKnown(model)) return "table";
+    return "default";
+}
+
 static inline const char* goveeDialectName(GoveeDialect d) {
     switch(d) {
     case GoveeRgbic: return "RGBIC";
@@ -453,6 +485,35 @@ static inline uint8_t goveeDialectSubmode(GoveeDialect d) {
     case GoveeRgbww: return GOVEE_SUBMODE_COLOR_RGBWW;
     default: return GOVEE_SUBMODE_COLOR_LEGACY;
     }
+}
+
+/* The census probe colour for a dialect: distinct per dialect, no channel
+ * zero or full, none of the app's kelvin tint colours. */
+static inline void goveeProbeColor(GoveeDialect d, uint8_t rgb[3]) {
+    switch(d) {
+    case GoveeRgbww: rgb[0] = 0x13; rgb[1] = 0x35; rgb[2] = 0x57; break;
+    case GoveeRgbic: rgb[0] = 0x14; rgb[1] = 0x36; rgb[2] = 0x58; break;
+    case GoveeDreamcolor: rgb[0] = 0x15; rgb[1] = 0x37; rgb[2] = 0x59; break;
+    default: rgb[0] = GOVEE_PROBE_R; rgb[1] = GOVEE_PROBE_G; rgb[2] = GOVEE_PROBE_B; break;
+    }
+}
+
+/* ------------------------------------------------------ evidence hygiene */
+
+/* True if the frame carries a pairing secret: AA B1 01 <8 bytes> or 33 B2 <8 bytes>. */
+static inline bool goveeFrameHasSecret(const uint8_t f[20]) {
+    if(f[0] == GOVEE_TYPE_READ && f[1] == GOVEE_CMD_SECRET_READ && f[2] == 0x01) return true;
+    if(f[0] == GOVEE_TYPE_WRITE && f[1] == GOVEE_CMD_SECRET_WRITE) return true;
+    return false;
+}
+
+/* Blanks the secret bytes in place and fixes the checksum. Returns true if changed. */
+static inline bool goveeFrameRedact(uint8_t f[20]) {
+    if(!goveeFrameHasSecret(f)) return false;
+    size_t from = f[0] == GOVEE_TYPE_READ ? 3 : 2;
+    memset(f + from, 0, 19 - from);
+    f[19] = goveeChecksum(f, 19);
+    return true;
 }
 
 static inline void hsvToRgb(uint16_t h, uint8_t s, uint8_t v, uint8_t& r, uint8_t& g, uint8_t& b) {

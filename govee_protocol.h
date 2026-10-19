@@ -64,8 +64,13 @@
 /* Legacy built-in scenes ("33 05 04 <id>"). */
 #define GOVEE_SCENE_BLINKING 0x08
 
-/* The probe colour used by every census write. Not one of the app's 178
- * kelvin tint colours, so a 0x0D firmware will not reinterpret it as CCT. */
+/* Probe colours for the census writes: one per dialect, so a colour that
+ * landed through one dialect cannot be mistaken for an echo of the next
+ * (the AA A5 segment page keeps whatever the last accepted write set). None
+ * is one of the app's 178 kelvin tint colours, so a 0x0D firmware will not
+ * reinterpret it as CCT, and every channel is distinct, non-zero and
+ * non-full so a partial echo is easy to tell from a real one. The
+ * GOVEE_PROBE_* triple is the legacy-dialect colour (kept for callers). */
 #define GOVEE_PROBE_R 0x12
 #define GOVEE_PROBE_G 0x34
 #define GOVEE_PROBE_B 0x56
@@ -190,8 +195,25 @@ GoveeDialect govee_dialect_for_light(const char* model, const GoveeAdvInfo* adv)
 /* True for SKUs in families tagged secret_key_pairing (SPEC 10.1): these may
  * accept the connection and ignore every write until 33 B2 <secret>. */
 bool govee_model_needs_secret(const char* model);
+/* True if the SKU is in any of the model tables (RGBIC, dreamcolor, RGBWW,
+ * legacy). Unknown SKUs fall back to the legacy 0x02 dialect too, but the
+ * census reports them as unknown rather than as a known legacy strip. */
+bool govee_model_known(const char* model);
+/* True for SKUs whose advertised pact decides between 0x0B and 0x15. */
+bool govee_model_is_dreamcolor(const char* model);
 const char* govee_dialect_name(GoveeDialect dialect);
 uint8_t govee_dialect_submode(GoveeDialect dialect);
+/* The census probe colour for `dialect` (see GOVEE_PROBE_*). */
+void govee_probe_color(GoveeDialect dialect, uint8_t rgb[3]);
+
+/* ---- evidence hygiene ---- */
+/* True if `frame` carries a pairing secret: an AA B1 reply with 01 at byte 2
+ * (8 secret bytes follow) or a 33 B2 write. */
+bool govee_frame_has_secret(const uint8_t frame[GOVEE_FRAME_LEN]);
+/* Blanks the secret bytes of such a frame in place and recomputes the
+ * checksum, so the record stays parseable. Returns true if anything was
+ * changed; callers should then mark the record as redacted. */
+bool govee_frame_redact(uint8_t frame[GOVEE_FRAME_LEN]);
 
 /* HSV (h 0-359, s/v 0-255) to RGB, for the patterns. */
 void govee_hsv_to_rgb(uint16_t h, uint8_t s, uint8_t v, uint8_t* r, uint8_t* g, uint8_t* b);
