@@ -10,5 +10,5 @@ App(
     fap_author="Martin Meredith",
     fap_description="Dance party and B-Gone for nearby Govee BLE lights",
     sources=["*.c"],
-    requires=["gui", "bt", "notification"],
+    requires=["gui", "bt", "notification", "storage"],
 )

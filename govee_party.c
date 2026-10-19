@@ -8,13 +8,20 @@
 #include <gui/modules/variable_item_list.h>
 #include <gui/modules/widget.h>
 #include <notification/notification_messages.h>
+#include <storage/storage.h>
+#include <furi_hal_rtc.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "govee_protocol.h"
 #include "govee_transport.h"
+#include "govee_census.h"
 
 #define TAG "GoveeParty"
+
+#define CENSUS_DIR  EXT_PATH("apps_data/govee_party")
+#define CENSUS_FILE CENSUS_DIR "/census.jsonl"
+#define CENSUS_TEXT_MAX 2048
 
 typedef enum {
     ViewMenu,
@@ -22,12 +29,14 @@ typedef enum {
     ViewSettings,
     ViewPick,
     ViewAbout,
+    ViewCensus,
 } ViewId;
 
 typedef enum {
     MenuParty,
     MenuLive,
     MenuBGone,
+    MenuCensus,
     MenuSettings,
     MenuAbout,
 } MenuIndex;
@@ -38,6 +47,7 @@ typedef enum {
     JobBGone,
     JobScanForLive,
     JobLive,
+    JobCensus,
 } Job;
 
 typedef enum {
@@ -76,6 +86,7 @@ typedef struct {
     Submenu* pick;
     VariableItemList* settings;
     Widget* about;
+    Widget* census_view;
     View* status;
 
     /* settings */
@@ -83,6 +94,11 @@ typedef struct {
     uint8_t scan_seconds;
     bool bgone_persistent;
     bool flipper_led;
+    bool census_probe; /* census writes the probe colour in every dialect */
+
+    /* census */
+    char* census_text; /* results for the widget, CENSUS_TEXT_MAX */
+    File* census_file;
 
     /* worker */
     FuriThread* worker;
@@ -256,6 +272,59 @@ static size_t worker_sweep(App* app, const char* title, VisitFn visit, size_t* f
     return hits;
 }
 
+/* The music sub-mode byte is per family (SPEC 8.2): 0x13 on the modern RGBIC
+ * stack, 0x11 on dreamcolor, 0x01 on the Telink-era strips the original
+ * softgrass frames came from. With a read path each candidate is checked
+ * against AA 05 01 and the first one the light echoes wins; without one,
+ * every candidate is written, least likely first, so the best guess lands
+ * last. */
+static void worker_music_frame(uint8_t f[GOVEE_FRAME_LEN], uint8_t sub) {
+    if(sub == GOVEE_SUBMODE_MUSIC_MODERN) {
+        govee_frame_music_modern(f, GOVEE_MUSIC13_DEFAULT, GOVEE_MUSIC_SENSITIVITY_DEFAULT);
+    } else if(sub == GOVEE_SUBMODE_MUSIC_DREAMCOLOR) {
+        govee_frame_music_dreamcolor(f, GOVEE_MUSIC11_ENERGETIC, GOVEE_MUSIC_SENSITIVITY_DEFAULT);
+    } else {
+        govee_frame_music(f, GOVEE_MUSIC_ENERGIC, 255, 0, 255);
+    }
+}
+
+static void worker_music(App* app, const GoveeLight* light) {
+    uint8_t cands[3];
+    switch(light->dialect) {
+    case GoveeDialectRgbic:
+        cands[0] = GOVEE_SUBMODE_MUSIC_MODERN;
+        cands[1] = GOVEE_SUBMODE_MUSIC_DREAMCOLOR;
+        cands[2] = GOVEE_SUBMODE_MUSIC_LEGACY;
+        break;
+    case GoveeDialectDreamcolor:
+        cands[0] = GOVEE_SUBMODE_MUSIC_DREAMCOLOR;
+        cands[1] = GOVEE_SUBMODE_MUSIC_MODERN;
+        cands[2] = GOVEE_SUBMODE_MUSIC_LEGACY;
+        break;
+    default:
+        cands[0] = GOVEE_SUBMODE_MUSIC_LEGACY;
+        cands[1] = GOVEE_SUBMODE_MUSIC_MODERN;
+        cands[2] = GOVEE_SUBMODE_MUSIC_DREAMCOLOR;
+        break;
+    }
+    bool can_read = govee_transport_can_read(app->transport) && govee_transport_subscribe(app->transport);
+    uint8_t f[GOVEE_FRAME_LEN], q[GOVEE_FRAME_LEN], a[GOVEE_FRAME_LEN];
+    /* with reads: most likely first, stop at the first echo;
+     * without: least likely first so the best guess is the last write */
+    int first = can_read ? 0 : 2, step = can_read ? 1 : -1;
+    for(int i = first; i >= 0 && i < 3; i += step) {
+        uint8_t sub = cands[i];
+        worker_music_frame(f, sub);
+        worker_send(app, f);
+        if(!can_read) continue;
+        govee_frame_read_mode(q);
+        if(govee_transport_read(app->transport, q, a, 1000) && a[2] == sub) {
+            FURI_LOG_I(TAG, "%s: music sub-mode 0x%02X", light->name, sub);
+            return;
+        }
+    }
+}
+
 static void visit_party(App* app, const GoveeLight* light) {
     uint8_t f[GOVEE_FRAME_LEN];
     govee_frame_power(f, true);
@@ -271,12 +340,11 @@ static void visit_party(App* app, const GoveeLight* light) {
         furi_delay_ms(90);
     }
     /* Then hand the light to its own party brain: the blinking scene as a
-     * fallback, then the microphone-driven "energic" music mode, which the
-     * H6159 family understands and which keeps going after we leave. */
+     * fallback, then a microphone-driven music mode, which keeps going after
+     * we leave. */
     govee_frame_scene(f, GOVEE_SCENE_BLINKING);
     worker_send(app, f);
-    govee_frame_music(f, GOVEE_MUSIC_ENERGIC, 255, 0, 255);
-    worker_send(app, f);
+    worker_music(app, light);
     flipper_led_off(app);
 }
 
@@ -367,6 +435,171 @@ static void worker_live(App* app) {
     govee_transport_disconnect(app->transport);
 }
 
+/* ------------------------------------------------------------- census */
+
+static void census_timestamp(char out[24]) {
+    DateTime dt;
+    furi_hal_rtc_get_datetime(&dt);
+    snprintf(
+        out,
+        24,
+        "%04u-%02u-%02uT%02u:%02u:%02u",
+        dt.year % 10000u,
+        dt.month % 100u,
+        dt.day % 100u,
+        dt.hour % 100u,
+        dt.minute % 100u,
+        dt.second % 100u);
+}
+
+static void census_file_line(App* app, const char* line) {
+    if(!app->census_file) return;
+    storage_file_write(app->census_file, line, strlen(line));
+    storage_file_write(app->census_file, "\n", 1);
+}
+
+typedef struct {
+    App* app;
+    const GoveeLight* light;
+    char addr[18];
+} CensusCtx;
+
+static bool census_io_write(void* ctx, const uint8_t* frame) {
+    CensusCtx* c = ctx;
+    return govee_transport_write(c->app->transport, frame, true);
+}
+
+static bool census_io_read(void* ctx, const uint8_t* request, uint8_t* reply, uint32_t timeout_ms) {
+    CensusCtx* c = ctx;
+    return govee_transport_read(c->app->transport, request, reply, timeout_ms);
+}
+
+static void census_io_delay(void* ctx, uint32_t ms) {
+    UNUSED(ctx);
+    furi_delay_ms(ms);
+}
+
+/* One JSON line per frame in the bench rig's shape:
+ * {"at","direction","frame","note","decoded","address"} */
+static void census_io_log(void* ctx, const char* direction, const uint8_t* frame, const char* note) {
+    CensusCtx* c = ctx;
+    if(!c->app->census_file) return;
+    char at[24], hex[GOVEE_FRAME_LEN * 2 + 1], decoded[48], line[224];
+    census_timestamp(at);
+    for(int i = 0; i < GOVEE_FRAME_LEN; i++) snprintf(hex + i * 2, 3, "%02x", frame[i]);
+    govee_frame_describe(frame, direction[0] == 'r', decoded, sizeof(decoded));
+    snprintf(
+        line,
+        sizeof(line),
+        "{\"at\":\"%s\",\"direction\":\"%s\",\"frame\":\"%s\",\"note\":\"%s\",\"decoded\":\"%s\",\"address\":\"%s\"}",
+        at,
+        direction,
+        hex,
+        note,
+        decoded,
+        c->addr);
+    census_file_line(c->app, line);
+}
+
+static void census_append_text(App* app, const char* text) {
+    size_t have = strlen(app->census_text);
+    size_t room = CENSUS_TEXT_MAX - have - 1;
+    size_t n = strlen(text);
+    if(n > room) n = room;
+    memcpy(app->census_text + have, text, n);
+    app->census_text[have + n] = '\0';
+}
+
+static void worker_census(App* app) {
+    app->census_text[0] = '\0';
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+    storage_simply_mkdir(storage, CENSUS_DIR);
+    app->census_file = storage_file_alloc(storage);
+    if(!storage_file_open(app->census_file, CENSUS_FILE, FSAM_WRITE, FSOM_OPEN_APPEND)) {
+        FURI_LOG_W(TAG, "cannot open %s", CENSUS_FILE);
+        storage_file_free(app->census_file);
+        app->census_file = NULL;
+    }
+    bool can_read = govee_transport_can_read(app->transport);
+    if(!can_read) census_append_text(app, "\e#No read path\nThis radio cannot subscribe;\nadvertisements only.\n\n");
+
+    for(size_t i = 0; i < app->light_count && !app->stop; i++) {
+        const GoveeLight* light = &app->lights[i];
+        CensusCtx ctx = {.app = app, .light = light};
+        snprintf(
+            ctx.addr,
+            sizeof(ctx.addr),
+            "%02x:%02x:%02x:%02x:%02x:%02x",
+            light->addr[0],
+            light->addr[1],
+            light->addr[2],
+            light->addr[3],
+            light->addr[4],
+            light->addr[5]);
+        char l1[40];
+        snprintf(l1, sizeof(l1), "%u/%u %s", (unsigned)i + 1, (unsigned)app->light_count, light->model);
+        status_set(app, "Census", l1, light->name, "Back = stop");
+        status_progress(app, (uint8_t)(i * 100 / app->light_count));
+
+        GoveeCensusResult r;
+        memset(&r, 0, sizeof(r));
+        if(light->adv.valid && light->adv.encrypted) {
+            /* An AES-wrapped link ignores plaintext frames; do not bother. */
+        } else if(govee_transport_connect(app->transport, light, 6000)) {
+            r.connected = true;
+            if(can_read && govee_transport_subscribe(app->transport)) {
+                r.subscribed = true;
+                GoveeCensusIo io = {
+                    .ctx = &ctx,
+                    .write = census_io_write,
+                    .read = census_io_read,
+                    .delay_ms = census_io_delay,
+                    .log = census_io_log,
+                };
+                govee_census_run(&io, light->model, app->census_probe, &r);
+            }
+            govee_transport_disconnect(app->transport);
+        } else {
+            FURI_LOG_W(TAG, "%s: %s", light->name, govee_transport_last_error(app->transport));
+        }
+
+        char json[512];
+        govee_census_summary_json(ctx.addr, light->name, light->model, &light->adv, light->rssi, &r, false, json, sizeof(json));
+        census_file_line(app, json);
+        FURI_LOG_I(TAG, "%s", json);
+
+        char brief[48], pact[20], block[200];
+        govee_census_summary_short(&r, brief, sizeof(brief));
+        if(light->adv.valid) {
+            snprintf(pact, sizeof(pact), "pact %u/%u%s", light->adv.pact_type, light->adv.pact_code, light->adv.encrypted ? " AES" : "");
+        } else {
+            snprintf(pact, sizeof(pact), "no mfr data");
+        }
+        snprintf(
+            block,
+            sizeof(block),
+            "\e#%s %s\n%s\n%s %ddB\n%s%s%s\n\n",
+            light->model,
+            govee_dialect_name(light->dialect),
+            light->name,
+            pact,
+            light->rssi,
+            brief,
+            r.hardware[0] ? " hw " : "",
+            r.hardware[0] ? r.hardware : "");
+        census_append_text(app, block);
+        furi_delay_ms(150);
+    }
+    status_progress(app, 100);
+    if(app->census_file) {
+        storage_file_close(app->census_file);
+        storage_file_free(app->census_file);
+        app->census_file = NULL;
+    }
+    furi_record_close(RECORD_STORAGE);
+    census_append_text(app, "Log: apps_data/govee_party/\ncensus.jsonl");
+}
+
 static int32_t worker_thread(void* context) {
     App* app = context;
     const char* why = NULL;
@@ -425,6 +658,19 @@ static int32_t worker_thread(void* context) {
         break;
     case JobLive:
         worker_live(app);
+        break;
+    case JobCensus:
+        if(worker_scan(app, "Census")) {
+            if(app->light_count == 0) {
+                status_set(app, NULL, "No Govee lights nearby", "", "Back");
+            } else {
+                worker_census(app);
+                char l1[40];
+                snprintf(l1, sizeof(l1), "%u light%s catalogued", (unsigned)app->light_count, app->light_count == 1 ? "" : "s");
+                status_set(app, "Census", l1, "", "Back");
+                notification_message(app->notifications, &sequence_success);
+            }
+        }
         break;
     default:
         break;
@@ -490,6 +736,10 @@ static void menu_callback(void* context, uint32_t index) {
         worker_start(app, JobBGone);
         view_dispatcher_switch_to_view(app->dispatcher, ViewStatus);
         break;
+    case MenuCensus:
+        worker_start(app, JobCensus);
+        view_dispatcher_switch_to_view(app->dispatcher, ViewStatus);
+        break;
     case MenuSettings:
         view_dispatcher_switch_to_view(app->dispatcher, ViewSettings);
         break;
@@ -505,6 +755,11 @@ static bool custom_event_callback(void* context, uint32_t event) {
         Job job = app->job;
         worker_stop(app);
         if(job == JobScanForLive) show_pick_list(app);
+        if(job == JobCensus && app->census_text[0]) {
+            widget_reset(app->census_view);
+            widget_add_text_scroll_element(app->census_view, 0, 0, 128, 64, app->census_text);
+            view_dispatcher_switch_to_view(app->dispatcher, ViewCensus);
+        }
         return true;
     }
     return false;
@@ -563,6 +818,12 @@ static void setting_persistent_changed(VariableItem* item) {
     setting_bool_text(item, app->bgone_persistent);
 }
 
+static void setting_census_probe_changed(VariableItem* item) {
+    App* app = variable_item_get_context(item);
+    app->census_probe = variable_item_get_current_value_index(item);
+    setting_bool_text(item, app->census_probe);
+}
+
 static void setting_led_changed(VariableItem* item) {
     App* app = variable_item_get_context(item);
     app->flipper_led = variable_item_get_current_value_index(item);
@@ -586,6 +847,10 @@ static void settings_build(App* app) {
     item = variable_item_list_add(app->settings, "Flipper LED", 2, setting_led_changed, app);
     variable_item_set_current_value_index(item, app->flipper_led);
     setting_bool_text(item, app->flipper_led);
+
+    item = variable_item_list_add(app->settings, "Census probes", 2, setting_census_probe_changed, app);
+    variable_item_set_current_value_index(item, app->census_probe);
+    setting_bool_text(item, app->census_probe);
 }
 
 /* ------------------------------------------------------------- lifecycle */
@@ -603,6 +868,9 @@ static App* app_alloc(void) {
     app->scan_seconds = 5;
     app->bgone_persistent = false;
     app->flipper_led = true;
+    app->census_probe = false;
+    app->census_text = malloc(CENSUS_TEXT_MAX);
+    app->census_text[0] = '\0';
     app->pattern = PatternRainbow;
     app->speed = 3;
     app->led_msg[0].type = NotificationMessageTypeLedRed;
@@ -622,6 +890,7 @@ static App* app_alloc(void) {
     submenu_add_item(app->menu, "Dance Party!", MenuParty, menu_callback, app);
     submenu_add_item(app->menu, "Live DJ (one light)", MenuLive, menu_callback, app);
     submenu_add_item(app->menu, "Govee B-Gone", MenuBGone, menu_callback, app);
+    submenu_add_item(app->menu, "Census (catalogue)", MenuCensus, menu_callback, app);
     submenu_add_item(app->menu, "Settings", MenuSettings, menu_callback, app);
     submenu_add_item(app->menu, "About", MenuAbout, menu_callback, app);
     view_set_previous_callback(submenu_get_view(app->menu), exit_callback);
@@ -659,12 +928,19 @@ static App* app_alloc(void) {
         "Stream patterns to one\nlight. Left/Right pattern,\nUp/Down speed, OK hold.\n\n"
         "\e#Govee B-Gone\n"
         "Every light: off. Turn on\n'lurks' to keep them off.\n\n"
+        "\e#Census\n"
+        "Reads what each light\nspeaks: firmware, mode,\nsegments, pairing secret.\n"
+        "Needs the ESP32 bridge v3.\nLog: apps_data/govee_party/\ncensus.jsonl\n\n"
         "\e#Radio\n"
         "Flipper BLE needs firmware\nwith BLE central (PR #4436)\n+ Full BLE stack.\n"
-        "ESP32 bridge: flash\nesp32/govee_bridge, wire\n13>RX 14<TX 5V GND.\n\n"
+        "ESP32 bridge: flash\nesp32/govee_party_esp32,\nwire 13>RX 14<TX 5V GND.\n\n"
         "Protocol from the\nGovee-Bluetooth HA\nintegration.");
     view_set_previous_callback(widget_get_view(app->about), menu_previous_callback);
     view_dispatcher_add_view(app->dispatcher, ViewAbout, widget_get_view(app->about));
+
+    app->census_view = widget_alloc();
+    view_set_previous_callback(widget_get_view(app->census_view), menu_previous_callback);
+    view_dispatcher_add_view(app->dispatcher, ViewCensus, widget_get_view(app->census_view));
 
     view_dispatcher_switch_to_view(app->dispatcher, ViewMenu);
     return app;
@@ -678,6 +954,9 @@ static void app_free(App* app) {
     view_dispatcher_remove_view(app->dispatcher, ViewPick);
     view_dispatcher_remove_view(app->dispatcher, ViewSettings);
     view_dispatcher_remove_view(app->dispatcher, ViewAbout);
+    view_dispatcher_remove_view(app->dispatcher, ViewCensus);
+    widget_free(app->census_view);
+    free(app->census_text);
     submenu_free(app->menu);
     submenu_free(app->pick);
     view_free(app->status);
