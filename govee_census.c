@@ -135,6 +135,19 @@ static void census_probe(const GoveeCensusIo* io, GoveeCensusResult* r) {
             have_page = true;
         }
         if(echoed) r->echoed |= (uint8_t)(1u << d);
+        /* Back to the starting state between dialects, so each one is
+         * judged from the same baseline (by eye and by read-back). */
+        GoveeDialect od;
+        if(i + 1 < sizeof(PROBE_ORDER) / sizeof(PROBE_ORDER[0]) && original_restorable(r, &od)) {
+            uint8_t body[1 + sizeof(r->mode_body)];
+            body[0] = r->submode;
+            memcpy(&body[1], r->mode_body, sizeof(r->mode_body));
+            govee_frame_build(f, GOVEE_TYPE_WRITE, GOVEE_CMD_MODE, body, sizeof(body));
+            census_write(io, f, "restore");
+            io->delay_ms(io->ctx, GOVEE_CENSUS_RESET_SETTLE_MS);
+            memcpy(last_mode_rgb, r->mode_body, 3);
+            have_mode_rgb = true;
+        }
     }
 
     /* Restore. Colour comes back only when the pre-probe mode reply named

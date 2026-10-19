@@ -117,7 +117,7 @@ With probes enabled (`CENSUS PROBE`, triple press with `CENSUS_PROBE_WRITES 1`
 at the top of the sketch, or *Census probes* in the Flipper's Settings) it
 then writes a colour in each dialect `02` / `0B` / `0D` / `15`, each followed
 by a mode read and `AA A5 01`. Every dialect has its own probe colour
-(`12 34 56`, `15 37 59`, `13 35 57`, `14 36 58`), and a dialect only counts
+(red `C8 1E 28` for `02`, green `1E C8 3C` for `0B`, blue `28 3C C8` for `0D`, magenta `B4 1E C8` for `15`, saturated so a person can tell them apart), and a dialect only counts
 as echoed when *its* colour shows up where it was not showing before, so a
 colour that landed through `02` cannot be credited to `0B` by the page read
 that follows. A light that was off is switched on for the probes and off

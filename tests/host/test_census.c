@@ -256,6 +256,16 @@ static void test_generated_frame_vectors(void) {
         else if(!strcmp(name, "read_light_count")) govee_frame_read_light_count(f);
         else if(!strcmp(name, "read_secret")) govee_frame_read_secret(f);
         else if(!strcmp(name, "read_segment_colors_1")) govee_frame_read_segment_colors(f, 1);
+        else if(!strncmp(name, "probe_", 6)) {
+            /* The census probe colours must match census.PROBE_COLORS in Python. */
+            GoveeDialect pd = !strcmp(name, "probe_02") ? GoveeDialectLegacy :
+                              !strcmp(name, "probe_0B") ? GoveeDialectDreamcolor :
+                              !strcmp(name, "probe_0D") ? GoveeDialectRgbww :
+                                                          GoveeDialectRgbic;
+            uint8_t c[3];
+            govee_probe_color(pd, c);
+            govee_frame_rgb_seg(f, c[0], c[1], c[2], pd, 15);
+        }
         else built = false; /* HA-only builders (colour temperature, HA brightness scaling) */
         if(!built) continue;
         hex(f, h);
@@ -420,7 +430,8 @@ static void test_probe_restores_colour_and_power(void) {
     CHECK(!d.power_on);
     CHECK(d.rgb[0] == 0xAA && d.rgb[1] == 0xBB && d.rgb[2] == 0xCC);
     CHECK(r.restored == GoveeCensusRestoredFull && r.restore_note == NULL);
-    CHECK(count_notes(&d, "restore") == 2);
+    /* Three resets to the baseline between dialects, the final colour, power. */
+    CHECK(count_notes(&d, "restore") == 5);
 
     /* An RGBIC light: the pre-probe colour is not readable, say so. */
     Fake e = fake_speaking(GoveeDialectRgbic);

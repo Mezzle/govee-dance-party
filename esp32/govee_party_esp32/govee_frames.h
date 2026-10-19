@@ -54,9 +54,9 @@
 /* Legacy-dialect probe colour; goveeProbeColor() gives the others (one per
  * dialect so a colour that landed through one dialect cannot be mistaken
  * for an echo of the next). */
-#define GOVEE_PROBE_R 0x12
-#define GOVEE_PROBE_G 0x34
-#define GOVEE_PROBE_B 0x56
+#define GOVEE_PROBE_R 0xC8
+#define GOVEE_PROBE_G 0x1E
+#define GOVEE_PROBE_B 0x28
 
 #define GOVEE_DEFAULT_SEGMENTS 15
 #define GOVEE_MASK_MAX_BYTES   7
@@ -466,10 +466,10 @@ static inline uint8_t goveeDialectSubmode(GoveeDialect d) {
  * zero or full, none of the app's kelvin tint colours. */
 static inline void goveeProbeColor(GoveeDialect d, uint8_t rgb[3]) {
     switch(d) {
-    case GoveeRgbww: rgb[0] = 0x13; rgb[1] = 0x35; rgb[2] = 0x57; break;
-    case GoveeRgbic: rgb[0] = 0x14; rgb[1] = 0x36; rgb[2] = 0x58; break;
-    case GoveeDreamcolor: rgb[0] = 0x15; rgb[1] = 0x37; rgb[2] = 0x59; break;
-    default: rgb[0] = GOVEE_PROBE_R; rgb[1] = GOVEE_PROBE_G; rgb[2] = GOVEE_PROBE_B; break;
+    case GoveeRgbww: rgb[0] = 0x28; rgb[1] = 0x3C; rgb[2] = 0xC8; break; /* blue */
+    case GoveeRgbic: rgb[0] = 0xB4; rgb[1] = 0x1E; rgb[2] = 0xC8; break; /* magenta */
+    case GoveeDreamcolor: rgb[0] = 0x1E; rgb[1] = 0xC8; rgb[2] = 0x3C; break; /* green */
+    default: rgb[0] = GOVEE_PROBE_R; rgb[1] = GOVEE_PROBE_G; rgb[2] = GOVEE_PROBE_B; break; /* red */
     }
 }
 

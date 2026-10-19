@@ -482,10 +482,10 @@ uint8_t govee_dialect_submode(GoveeDialect dialect) {
 void govee_probe_color(GoveeDialect dialect, uint8_t rgb[3]) {
     /* Distinct per dialect; see the GOVEE_PROBE_* comment in the header. */
     switch(dialect) {
-    case GoveeDialectRgbww: rgb[0] = 0x13; rgb[1] = 0x35; rgb[2] = 0x57; break;
-    case GoveeDialectRgbic: rgb[0] = 0x14; rgb[1] = 0x36; rgb[2] = 0x58; break;
-    case GoveeDialectDreamcolor: rgb[0] = 0x15; rgb[1] = 0x37; rgb[2] = 0x59; break;
-    default: rgb[0] = GOVEE_PROBE_R; rgb[1] = GOVEE_PROBE_G; rgb[2] = GOVEE_PROBE_B; break;
+    case GoveeDialectRgbww: rgb[0] = 0x28; rgb[1] = 0x3C; rgb[2] = 0xC8; break; /* blue */
+    case GoveeDialectRgbic: rgb[0] = 0xB4; rgb[1] = 0x1E; rgb[2] = 0xC8; break; /* magenta */
+    case GoveeDialectDreamcolor: rgb[0] = 0x1E; rgb[1] = 0xC8; rgb[2] = 0x3C; break; /* green */
+    default: rgb[0] = GOVEE_PROBE_R; rgb[1] = GOVEE_PROBE_G; rgb[2] = GOVEE_PROBE_B; break; /* red */
     }
 }
 

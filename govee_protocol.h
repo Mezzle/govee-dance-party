@@ -64,16 +64,18 @@
 /* Legacy built-in scenes ("33 05 04 <id>"). */
 #define GOVEE_SCENE_BLINKING 0x08
 
-/* Probe colours for the census writes: one per dialect, so a colour that
+/* Probe colours for the census writes: red (02), green (0B), blue (0D) and
+ * magenta (15), saturated so a person can tell them apart (the first set,
+ * four near-identical dark blues, could not be). One per dialect, so a colour that
  * landed through one dialect cannot be mistaken for an echo of the next
  * (the AA A5 segment page keeps whatever the last accepted write set). None
  * is one of the app's 178 kelvin tint colours, so a 0x0D firmware will not
  * reinterpret it as CCT, and every channel is distinct, non-zero and
  * non-full so a partial echo is easy to tell from a real one. The
  * GOVEE_PROBE_* triple is the legacy-dialect colour (kept for callers). */
-#define GOVEE_PROBE_R 0x12
-#define GOVEE_PROBE_G 0x34
-#define GOVEE_PROBE_B 0x56
+#define GOVEE_PROBE_R 0xC8
+#define GOVEE_PROBE_G 0x1E
+#define GOVEE_PROBE_B 0x28
 
 /* The default whole-strip mask FF 7F addresses 15 segments; see
  * govee_segment_mask() for other counts. */

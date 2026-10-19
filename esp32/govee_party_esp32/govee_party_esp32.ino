@@ -125,7 +125,7 @@
 #define CENSUS_SILENT_AFTER 3
 #define EVIDENCE_SCHEMA "govee-evidence/1"
 
-/* Census probe writes (12 34 56 in each dialect) change the light's colour
+/* Census probe writes (red 02, green 0B, blue 0D, magenta 15) change the light's colour
  * and mode. Off by default; set to 1 here, or send "CENSUS PROBE". */
 #ifndef CENSUS_PROBE_WRITES
 #define CENSUS_PROBE_WRITES 0
@@ -1038,6 +1038,18 @@ static void censusProbe(CensusResult& r) {
             havePage = true;
         }
         if(echoed) r.echoed |= (uint8_t)(1u << d);
+        /* Back to the starting 02 / 0D state between dialects (same as govee_census.c). */
+        bool restorable = r.submodeKnown && (r.submode == GOVEE_SUBMODE_COLOR_LEGACY || r.submode == GOVEE_SUBMODE_COLOR_RGBWW);
+        if(d != order[3] && restorable) {
+            uint8_t body[9];
+            body[0] = r.submode;
+            memcpy(body + 1, r.modeBody, 8);
+            goveeBuild(f, GOVEE_TYPE_WRITE, GOVEE_CMD_MODE, body, sizeof(body));
+            censusWrite(f, "restore");
+            delay(600);
+            memcpy(lastModeRgb, r.modeBody, 3);
+            haveModeRgb = true;
+        }
     }
 
     /* Restore: the pre-probe 02 / 0D body written back verbatim (the reply
