@@ -21,6 +21,7 @@
 
 #define AD_TYPE_SHORT_NAME    0x08
 #define AD_TYPE_COMPLETE_NAME 0x09
+#define AD_TYPE_MANUFACTURER  0xFF
 
 typedef struct {
     Bt* bt;
@@ -44,6 +45,12 @@ static void native_scan_cb(const BleCentralAdvReport* report, void* context) {
        !ble_central_adv_find(report, AD_TYPE_SHORT_NAME, &name, &name_len)) {
         return;
     }
+    const uint8_t* mfr = NULL;
+    uint8_t mfr_len = 0;
+    GoveeAdvInfo adv = {0};
+    if(ble_central_adv_find(report, AD_TYPE_MANUFACTURER, &mfr, &mfr_len)) {
+        govee_adv_parse_mfr(mfr, mfr_len, &adv);
+    }
     furi_mutex_acquire(impl->mutex, FuriWaitForever);
     bool added = govee_light_list_add(
         impl->lights,
@@ -53,7 +60,8 @@ static void native_scan_cb(const BleCentralAdvReport* report, void* context) {
         report->addr_type,
         report->rssi,
         (const char*)name,
-        name_len);
+        name_len,
+        &adv);
     GoveeLight copy;
     size_t n = *impl->count;
     if(added) copy = impl->lights[n - 1];
@@ -163,6 +171,10 @@ static const GoveeTransportVtable native_vt = {
     .write = native_write,
     .disconnect = native_disconnect,
     .free = native_free,
+    /* PR #4436's central API exposes writes only; no notification path, so
+     * no reads. The census falls back to advertisement-only cataloguing. */
+    .subscribe = NULL,
+    .read = NULL,
 };
 
 bool govee_transport_native_available(const char** why) {
@@ -188,6 +200,8 @@ GoveeTransport* govee_transport_native_alloc(void) {
     t->kind = GoveeTransportNative;
     t->last_error = NULL;
     t->impl = impl;
+    t->notify_cb = NULL;
+    t->notify_ctx = NULL;
     return t;
 }
 

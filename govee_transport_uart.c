@@ -1,12 +1,20 @@
-/* UART backend: an ESP32 on the GPIO header runs esp32/govee_bridge and does
- * the BLE work. Line protocol at 115200 8N1 on Flipper pins 13 (TX) / 14 (RX):
+/* UART backend: an ESP32 on the GPIO header runs esp32/govee_party_esp32 and
+ * does the BLE work. Line protocol at 115200 8N1 on Flipper pins 13 (TX) /
+ * 14 (RX):
  *
  *   > PING                       < PONG govee-bridge <version>
- *   > SCAN <ms>                  < ADV <aa:bb:cc:dd:ee:ff> <type> <rssi> <name>  (repeated)
+ *   > SCAN <ms>                  < ADV <mac> <type> <rssi> <pactType> <pactCode> <flags> <enc> <name>
+ *                                  (version 3; version 2 bridges send
+ *                                   ADV <mac> <type> <rssi> <name>; pact
+ *                                   columns are "-" without manufacturer data)
  *                                < SCAN_DONE
  *   > CONN <aa:bb:cc:dd:ee:ff> <type>   < OK | ERR <reason>
  *   > W <40 hex chars> [R]       < OK | ERR <reason>   (R = write with response)
+ *   > N                          < OK | ERR <reason>   (subscribe to status notifications)
+ *   > R <40 hex chars> [ms]      < RX <40 hex chars> | ERR timeout
+ *                                < NOTIFY <40 hex chars>  (unsolicited, while subscribed)
  *   > DISC                       < OK
+ *   > CENSUS [PROBE]             < CENSUS <json> ... CENSUS_DONE  (standalone census; not used here)
  */
 
 #include "govee_transport.h"
@@ -20,7 +28,7 @@
 #define TAG "GoveeUart"
 
 #define UART_BAUD    115200
-#define LINE_MAX     96
+#define LINE_MAX     128
 #define RX_BUF_SIZE  512
 #define REPLY_TIMEOUT 1500
 
@@ -30,6 +38,8 @@ typedef struct {
     Expansion* expansion;
     bool otg_was_on;
     bool connected;
+    bool subscribed;
+    unsigned version; /* from PONG */
 } UartImpl;
 
 static void uart_rx_cb(FuriHalSerialHandle* handle, FuriHalSerialRxEvent event, void* context) {
@@ -76,6 +86,8 @@ static void uart_flush(UartImpl* impl) {
     }
 }
 
+static void uart_handle_notify(GoveeTransport* t, const char* line);
+
 /* Sends a command and waits for OK / ERR. */
 static bool uart_command(GoveeTransport* t, const char* cmd, uint32_t timeout_ms) {
     UartImpl* impl = t->impl;
@@ -90,10 +102,25 @@ static bool uart_command(GoveeTransport* t, const char* cmd, uint32_t timeout_ms
             t->last_error = reply + (reply[3] == ' ' ? 4 : 3);
             return false;
         }
-        /* ignore chatter such as late ADV lines */
+        uart_handle_notify(t, reply);
+        /* ignore other chatter such as late ADV lines */
     }
     t->last_error = "Bridge timeout";
     return false;
+}
+
+/* "NOTIFY <40 hex>" lines arrive whenever the light pushes a frame while
+ * the bridge is subscribed. Hand them to the app's callback, if any. */
+static void uart_handle_notify(GoveeTransport* t, const char* line) {
+    if(!t->notify_cb || strncmp(line, "NOTIFY ", 7) != 0) return;
+    if(strlen(line + 7) < GOVEE_FRAME_LEN * 2) return;
+    uint8_t frame[GOVEE_FRAME_LEN];
+    for(int i = 0; i < GOVEE_FRAME_LEN; i++) {
+        unsigned v;
+        if(sscanf(line + 7 + i * 2, "%2x", &v) != 1) return;
+        frame[i] = (uint8_t)v;
+    }
+    t->notify_cb(frame, t->notify_ctx);
 }
 
 static bool parse_mac(const char* s, uint8_t out[6]) {
@@ -133,7 +160,8 @@ static bool uart_scan(
             return false;
         }
         if(strncmp(line, "ADV ", 4) != 0) continue;
-        /* ADV <mac> <type> <rssi> <name...> */
+        /* v2: ADV <mac> <type> <rssi> <name...>
+         * v3: ADV <mac> <type> <rssi> <pactType> <pactCode> <flags> <enc> <name...> */
         char* p = line + 4;
         uint8_t addr[6];
         if(!parse_mac(p, addr)) continue;
@@ -143,8 +171,30 @@ static bool uart_scan(
         if(*p != ' ') continue;
         int rssi = (int)strtol(p + 1, &p, 10);
         if(*p != ' ') continue;
+        GoveeAdvInfo adv = {0};
+        if(impl->version >= 3) {
+            char* q = p + 1;
+            if(*q != '-') {
+                adv.valid = true;
+                adv.pact_type = (uint16_t)strtoul(q, &q, 10);
+                if(*q != ' ') continue;
+                adv.pact_code = (uint8_t)strtoul(q + 1, &q, 10);
+                if(*q != ' ') continue;
+                adv.flags = (uint8_t)strtoul(q + 1, &q, 16);
+                if(*q != ' ') continue;
+                adv.encrypted = strtoul(q + 1, &q, 10) != 0;
+                if(*q != ' ') continue;
+                adv.proto_version = adv.flags & 0x0F;
+            } else {
+                /* "- - - 0" */
+                for(int col = 0; col < 4 && q; col++) q = strchr(q + 1, ' ');
+                if(!q) continue;
+            }
+            p = q;
+        }
         const char* name = p + 1;
-        if(govee_light_list_add(lights, max, count, addr, addr_type, (int8_t)rssi, name, strlen(name))) {
+        if(govee_light_list_add(
+               lights, max, count, addr, addr_type, (int8_t)rssi, name, strlen(name), &adv)) {
             if(on_found) on_found(&lights[*count - 1], *count, context);
         }
     }
@@ -196,6 +246,60 @@ static void uart_disconnect(GoveeTransport* t) {
     if(!impl->connected) return;
     uart_command(t, "DISC", REPLY_TIMEOUT);
     impl->connected = false;
+    impl->subscribed = false;
+}
+
+static bool uart_subscribe(GoveeTransport* t) {
+    UartImpl* impl = t->impl;
+    if(!impl->connected) {
+        t->last_error = "Not connected";
+        return false;
+    }
+    if(impl->version < 3) {
+        t->last_error = "Bridge too old (flash v3)";
+        return false;
+    }
+    impl->subscribed = uart_command(t, "N", REPLY_TIMEOUT);
+    return impl->subscribed;
+}
+
+static bool uart_read(GoveeTransport* t, const uint8_t* request, uint8_t* reply, uint32_t timeout_ms) {
+    UartImpl* impl = t->impl;
+    if(!impl->connected) {
+        t->last_error = "Not connected";
+        return false;
+    }
+    if(!impl->subscribed && !uart_subscribe(t)) return false;
+    char cmd[2 + GOVEE_FRAME_LEN * 2 + 12];
+    char* p = cmd;
+    p += snprintf(p, sizeof(cmd) - (p - cmd), "R ");
+    for(int i = 0; i < GOVEE_FRAME_LEN; i++) p += snprintf(p, sizeof(cmd) - (p - cmd), "%02x", request[i]);
+    snprintf(p, sizeof(cmd) - (p - cmd), " %lu", (unsigned long)timeout_ms);
+    static char line[LINE_MAX];
+    uart_flush(impl);
+    uart_send_line(impl, cmd);
+    uint32_t start = furi_get_tick();
+    uint32_t budget = timeout_ms + REPLY_TIMEOUT;
+    while(furi_get_tick() - start < furi_ms_to_ticks(budget)) {
+        if(!uart_read_line(impl, line, sizeof(line), budget)) break;
+        if(strncmp(line, "RX ", 3) == 0) {
+            if(strlen(line + 3) < GOVEE_FRAME_LEN * 2) continue;
+            for(int i = 0; i < GOVEE_FRAME_LEN; i++) {
+                unsigned v;
+                if(sscanf(line + 3 + i * 2, "%2x", &v) != 1) return false;
+                reply[i] = (uint8_t)v;
+            }
+            return true;
+        }
+        if(strncmp(line, "ERR", 3) == 0) {
+            t->last_error = line + (line[3] == ' ' ? 4 : 3);
+            if(strncmp(t->last_error, "disconnected", 12) == 0) impl->connected = false;
+            return false;
+        }
+        uart_handle_notify(t, line);
+    }
+    t->last_error = "Bridge timeout";
+    return false;
 }
 
 static void uart_free(GoveeTransport* t) {
@@ -219,6 +323,8 @@ static const GoveeTransportVtable uart_vt = {
     .write = uart_write,
     .disconnect = uart_disconnect,
     .free = uart_free,
+    .subscribe = uart_subscribe,
+    .read = uart_read,
 };
 
 bool govee_transport_uart_available(const char** why) {
@@ -248,6 +354,8 @@ GoveeTransport* govee_transport_uart_alloc(void) {
     t->kind = GoveeTransportUart;
     t->last_error = NULL;
     t->impl = impl;
+    t->notify_cb = NULL;
+    t->notify_ctx = NULL;
 
     /* Give a freshly powered bridge a moment, then check it answers. */
     bool alive = false;
@@ -260,6 +368,10 @@ GoveeTransport* govee_transport_uart_alloc(void) {
             if(!uart_read_line(impl, reply, sizeof(reply), 500)) break;
             if(strncmp(reply, "PONG", 4) == 0) {
                 alive = true;
+                /* PONG govee-bridge <version> */
+                const char* sp = strrchr(reply, ' ');
+                impl->version = sp ? (unsigned)strtoul(sp + 1, NULL, 10) : 2;
+                if(impl->version == 0) impl->version = 2;
                 break;
             }
         }

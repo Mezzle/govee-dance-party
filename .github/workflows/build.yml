@@ -11,6 +11,15 @@ permissions:
   contents: write
 
 jobs:
+  host-tests:
+    name: Host unit tests (protocol + census)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Vendored model table is one file in two places
+        run: cmp generated/govee_models_gen.h esp32/govee_party_esp32/govee_models_gen.h
+      - run: make -C tests/host
+
   flipper:
     name: Flipper app (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -71,7 +80,7 @@ jobs:
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [flipper, esp32]
+    needs: [host-tests, flipper, esp32]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -91,7 +100,7 @@ jobs:
           esptool.py --chip esp32s3 write_flash 0x0 govee_party-m5stack_atoms3.bin   # ATOMS3 Lite
           esptool.py --chip esp32   write_flash 0x0 govee_party-m5stack_atom.bin     # ATOM Lite
           ```
-          Short press = Dance Party, double = Rave, long = B-Gone, hold at power-on = Lurk. Plug into the Flipper's GPIO header to use it as the bridge.
+          Short press = Dance Party, double = Rave, triple = Census, long = B-Gone, hold at power-on = Lurk. Plug into the Flipper's GPIO header to use it as the bridge.
           MD
       - uses: softprops/action-gh-release@v2
         with:

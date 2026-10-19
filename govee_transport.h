@@ -6,8 +6,9 @@
  *  - Native: the Flipper's own radio via furi_ble/central.h. Needs a firmware
  *    built with the BLE central role (upstream PR #4436) and the STM32WB Full
  *    BLE stack installed.
- *  - UART: an ESP32 running esp32/govee_bridge on the GPIO header, which does
- *    the BLE work and takes line commands over serial. Works on any firmware.
+ *  - UART: an ESP32 running esp32/govee_party_esp32 on the GPIO header, which
+ *    does the BLE work and takes line commands over serial. Works on any
+ *    firmware, and is the only backend with a read path (subscribe + read).
  *
  * All calls are blocking and must be made from a worker thread, never from a
  * GUI callback. */
@@ -22,6 +23,7 @@ typedef struct {
     char name[GOVEE_LIGHT_NAME_LEN];
     char model[6];
     GoveeDialect dialect;
+    GoveeAdvInfo adv; /* pact / flags from the manufacturer data, if seen */
 } GoveeLight;
 
 typedef enum {
@@ -64,7 +66,27 @@ bool govee_transport_write(
     bool with_response);
 void govee_transport_disconnect(GoveeTransport* transport);
 
+/* Read path. Not every backend has one: check govee_transport_can_read()
+ * before building anything on it. subscribe() enables notifications on the
+ * status characteristic (2b10); read() writes an AA request on 2b11 and waits
+ * up to timeout_ms for the matching AA reply. Unsolicited notifications are
+ * dropped by the UART backend unless a notify callback is set. */
+bool govee_transport_can_read(GoveeTransport* transport);
+bool govee_transport_subscribe(GoveeTransport* transport);
+bool govee_transport_read(
+    GoveeTransport* transport,
+    const uint8_t request[GOVEE_FRAME_LEN],
+    uint8_t reply[GOVEE_FRAME_LEN],
+    uint32_t timeout_ms);
+
 const char* govee_transport_last_error(GoveeTransport* transport);
+
+/* Frames the light pushed on the status characteristic that were not the
+ * reply to a pending read: 33 xx write acks, EE xx pushes, late replies.
+ * Delivered from inside read()/write() calls on the worker thread; NULL
+ * clears it. Backends without a read path never call it. */
+typedef void (*GoveeNotifyCallback)(const uint8_t frame[GOVEE_FRAME_LEN], void* context);
+void govee_transport_set_notify_callback(GoveeTransport* transport, GoveeNotifyCallback cb, void* context);
 
 /* Implementation detail shared by the two backends. */
 typedef struct {
@@ -82,6 +104,9 @@ typedef struct {
     bool (*write)(GoveeTransport*, const uint8_t*, bool);
     void (*disconnect)(GoveeTransport*);
     void (*free)(GoveeTransport*);
+    /* optional: NULL when the backend cannot read */
+    bool (*subscribe)(GoveeTransport*);
+    bool (*read)(GoveeTransport*, const uint8_t*, uint8_t*, uint32_t);
 } GoveeTransportVtable;
 
 struct GoveeTransport {
@@ -89,6 +114,8 @@ struct GoveeTransport {
     GoveeTransportKind kind;
     const char* last_error;
     void* impl;
+    GoveeNotifyCallback notify_cb;
+    void* notify_ctx;
 };
 
 /* Backend constructors (return NULL on failure). */
@@ -98,7 +125,7 @@ GoveeTransport* govee_transport_uart_alloc(void);
 bool govee_transport_uart_available(const char** why);
 
 /* Helper for both backends: add a light to a list if it is a Govee and not
- * already present. Returns true if added. */
+ * already present. `adv` may be NULL. Returns true if added. */
 bool govee_light_list_add(
     GoveeLight* lights,
     size_t max,
@@ -107,4 +134,5 @@ bool govee_light_list_add(
     uint8_t addr_type,
     int8_t rssi,
     const char* name,
-    size_t name_len);
+    size_t name_len,
+    const GoveeAdvInfo* adv);
