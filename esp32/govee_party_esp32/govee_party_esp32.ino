@@ -176,7 +176,7 @@ struct CensusResult {
     bool brightnessKnown = false;
     uint8_t brightness = 0;
     bool submodeKnown = false;
-    uint8_t submode = 0, modeBody[4] = {0};
+    uint8_t submode = 0, modeBody[8] = {0};
     char firmware[12] = "", hardware[12] = "";
     bool icKnown = false;
     uint16_t icCount = 0;
@@ -208,6 +208,9 @@ static NimBLEClient* client = nullptr;
 static NimBLERemoteCharacteristic* control = nullptr;
 static NimBLERemoteCharacteristic* status = nullptr;
 static bool subscribed = false;
+/* Whether 2b11 takes write requests. The H6006 (and H6004 per egold555)
+ * offer write-without-response only, refuse a request and drop the link. */
+static bool controlWithResponse = true;
 static volatile bool scanning = false;
 static bool bridgeScan = false; /* scan was requested by the Flipper: stream ADV lines */
 static bool bridgeSession = false; /* Flipper owns the connection */
@@ -514,6 +517,7 @@ static const char* connectLight(const NimBLEAddress& addr) {
         client->disconnect();
         return "no govee service";
     }
+    controlWithResponse = control->canWrite();
     led(0, 40, 0);
     return nullptr;
 }
@@ -541,7 +545,7 @@ static const char* subscribeStatus() {
 
 static bool send(const uint8_t frame[20], bool withResponse = true) {
     if(!connected()) return false;
-    bool ok = control->writeValue(frame, 20, withResponse);
+    bool ok = control->writeValue(frame, 20, withResponse && controlWithResponse);
     delay(60);
     return ok;
 }
@@ -583,7 +587,7 @@ static bool readFrame(const uint8_t req[20], uint8_t rep[20], uint32_t timeoutMs
     const char* err = subscribeStatus();
     if(err) return false;
     if(logging) logFrame("tx", req, "query", logAddress);
-    if(!control->writeValue(req, 20, true)) return false;
+    if(!control->writeValue(req, 20, controlWithResponse)) return false;
     unsigned long until = millis() + timeoutMs;
     while((long)(until - millis()) > 0) {
         uint8_t f[20];
@@ -670,7 +674,8 @@ static void bridgeWrite(const String& hex, bool withResponse) {
         reply("ERR bad hex");
         return;
     }
-    if(control->writeValue(frame, 20, withResponse)) {
+    /* "W ... R" asks for a write request; downgrade where 2b11 refuses one. */
+    if(control->writeValue(frame, 20, withResponse && controlWithResponse)) {
         reply("OK");
     } else {
         reply(client->isConnected() ? "ERR write failed" : "ERR disconnected");
@@ -1035,10 +1040,15 @@ static void censusProbe(CensusResult& r) {
         if(echoed) r.echoed |= (uint8_t)(1u << d);
     }
 
-    /* Restore: colour only when the pre-probe mode reply named it (02 / 0D). */
+    /* Restore: the pre-probe 02 / 0D body written back verbatim (the reply
+     * mirrors the write layout; an RGB write would turn a 0D white, reported
+     * as RGB 00 00 00 + kelvin on the H6006, into black). */
     if(r.submodeKnown && (r.submode == GOVEE_SUBMODE_COLOR_LEGACY || r.submode == GOVEE_SUBMODE_COLOR_RGBWW)) {
         GoveeDialect od = r.submode == GOVEE_SUBMODE_COLOR_LEGACY ? GoveeLegacy : GoveeRgbww;
-        goveeRgbSeg(f, r.modeBody[0], r.modeBody[1], r.modeBody[2], od, segments);
+        uint8_t body[9];
+        body[0] = r.submode;
+        memcpy(body + 1, r.modeBody, 8);
+        goveeBuild(f, GOVEE_TYPE_WRITE, GOVEE_CMD_MODE, body, sizeof(body));
         censusWrite(f, "restore");
         r.restored = RestoredFull;
         r.restoreNote = (r.echoed & (1u << od)) ? nullptr : "colour rewritten in the reported dialect, which did not echo";
@@ -1076,7 +1086,7 @@ static void censusRun(bool probe, CensusResult& r) {
         return;
     }
     goveeReadMode(q);
-    if(censusRead(q, a, r)) { r.submodeKnown = true; r.submode = a[2]; memcpy(r.modeBody, a + 3, 4); }
+    if(censusRead(q, a, r)) { r.submodeKnown = true; r.submode = a[2]; memcpy(r.modeBody, a + 3, 8); }
     goveeReadHardware(q);
     if(censusRead(q, a, r)) goveeReplyVersionString(a, r.hardware, sizeof(r.hardware));
     goveeReadIcCount(q);

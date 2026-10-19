@@ -46,7 +46,7 @@ typedef struct {
     uint8_t brightness;
     bool submode_known;
     uint8_t submode;
-    uint8_t mode_body[4]; /* bytes after the sub-mode in the AA 05 reply */
+    uint8_t mode_body[8]; /* bytes after the sub-mode in the AA 05 reply */
     char firmware[12];
     char hardware[12];
     bool ic_known;

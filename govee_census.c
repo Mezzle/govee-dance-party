@@ -67,9 +67,13 @@ void govee_census_note_notify(const GoveeCensusIo* io, const uint8_t frame[GOVEE
 static const GoveeDialect PROBE_ORDER[] = {
     GoveeDialectLegacy, GoveeDialectDreamcolor, GoveeDialectRgbww, GoveeDialectRgbic};
 
-/* The pre-probe colour, if the mode reply carried one (02 and 0D bodies
- * start with R G B on the families verified so far; 0B and 15 never do). */
-static bool original_rgb(const GoveeCensusResult* r, uint8_t rgb[3], GoveeDialect* dialect) {
+/* Whether the pre-probe state can be written back: 02 and 0D replies mirror
+ * the write layout on every kind seen on hardware (H6159, H6181, H6006), so
+ * the reported body is rewritten verbatim. An RGB write would not do: a 0D
+ * light in white mode reports RGB 00 00 00 beside its kelvin (H6006:
+ * 0D 000000 0A8C 000000), and writing that RGB leaves it dark. 0B and 15
+ * replies carry no colour at all. */
+static bool original_restorable(const GoveeCensusResult* r, GoveeDialect* dialect) {
     if(!r->submode_known) return false;
     if(r->submode == GOVEE_SUBMODE_COLOR_LEGACY) {
         *dialect = GoveeDialectLegacy;
@@ -78,7 +82,6 @@ static bool original_rgb(const GoveeCensusResult* r, uint8_t rgb[3], GoveeDialec
     } else {
         return false;
     }
-    memcpy(rgb, r->mode_body, 3);
     return true;
 }
 
@@ -138,10 +141,12 @@ static void census_probe(const GoveeCensusIo* io, GoveeCensusResult* r) {
      * it (02 / 0D) and that dialect is known to work (it echoed, or it was
      * the reported mode). Scenes, music and 0B/15 colours are not rewritten:
      * the summary says so. */
-    uint8_t rgb[3];
     GoveeDialect od;
-    if(original_rgb(r, rgb, &od)) {
-        govee_frame_rgb_seg(f, rgb[0], rgb[1], rgb[2], od, segments);
+    if(original_restorable(r, &od)) {
+        uint8_t body[1 + sizeof(r->mode_body)];
+        body[0] = r->submode;
+        memcpy(&body[1], r->mode_body, sizeof(r->mode_body));
+        govee_frame_build(f, GOVEE_TYPE_WRITE, GOVEE_CMD_MODE, body, sizeof(body));
         census_write(io, f, "restore");
         r->restored = GoveeCensusRestoredFull;
         r->restore_note = (r->echoed & (1u << od)) ? NULL : "colour rewritten in the reported dialect, which did not echo";
