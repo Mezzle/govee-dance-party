@@ -15,7 +15,7 @@ impolite one.
 | **Dance Party!** | Scans, then visits every Govee light in range: power on, brightness 100 %, a few colour pops, then the blinking scene and the mic-driven *energic* music mode. The light keeps partying after the Flipper walks away. |
 | **Live DJ** | Pick one light and stream patterns to it: Rainbow, Strobe, Police, Disco, Pulse, Fire. Left/Right changes the pattern, Up/Down the speed, OK holds the current colour. The Flipper's own LED mirrors the colour. |
 | **Govee B-Gone** | Scans, then turns every Govee light in range off. With *B-Gone lurks* on in Settings it keeps rescanning and switching off anything that dares come back on, until you press Back. |
-| **Census** | Scans, then visits every light and asks what it speaks: firmware, hardware, current mode, segment count, whether it still hands out its pairing secret. Nothing is written unless *Census probes* is on in Settings. Results go on screen and to `apps_data/govee_party/census.jsonl`. Needs the ESP32 bridge (v3). |
+| **Census** | Scans, then visits every light and asks what it speaks: firmware, hardware, current mode, segment count, whether it still hands out its pairing secret. Nothing is written unless *Census probes* is on in Settings. Results go on screen and to `apps_data/govee_party/census.jsonl` as `govee-evidence/1` records (see [docs/evidence.md](docs/evidence.md)). Needs the ESP32 bridge (v3 or later). |
 
 No pairing, no app, no cloud. Most Govee firmware accepts writes from anyone
 who connects, which is the whole joke. The exceptions are the families the
@@ -73,7 +73,7 @@ PC can drive the board without a Flipper). Hex is 40 characters for a
 
 | Send | Get back | Notes |
 | --- | --- | --- |
-| `PING` | `PONG govee-bridge 3` | works even while a button job runs |
+| `PING` | `PONG govee-bridge 4` | works even while a button job runs, and between lights during a census |
 | `SCAN <ms>` | `ADV <mac> <addrtype> <rssi> <pactType> <pactCode> <flags> <enc> <name>` per light, then `SCAN_DONE` | pact columns are `-` when the advertisement has no manufacturer data; `flags` is hex, `enc` is `1` when bit 6 is set (AES link). Version 2 bridges sent `ADV <mac> <addrtype> <rssi> <name>`; the app reads the version from `PONG` and parses either. |
 | `STOP` | `OK` | abort a scan |
 | `CONN <mac> <addrtype>` | `OK` or `ERR <reason>` | |
@@ -81,24 +81,44 @@ PC can drive the board without a Flipper). Hex is 40 characters for a
 | `N` | `OK` or `ERR <reason>` | subscribe to the status characteristic `...2b10` |
 | `R <hex> [timeout_ms]` | `RX <hex>` or `ERR timeout` | writes a read frame on `...2b11` and returns the matching `AA` reply (same command; same selector for `07`/`A2`/`A5`). Subscribes first if needed. |
 | (unsolicited) | `NOTIFY <hex>` | any other notification while subscribed |
+| `BGC` | `BGC <hex>` or `ERR no bgc` | reads the BGC-info characteristic `...2b12` (the `encryptVersion` record); version 4 |
+| `SVC` | `SVC <service> <characteristic> <props>` per characteristic, then `SVC_DONE` | GATT table of the connected light; props are `r w W n i`; version 4 |
 | `DISC` | `OK` | |
 | `CENSUS [PROBE]` | `CENSUS <json>` per light, then `CENSUS_DONE` | runs the standalone census; `PROBE` adds the colour writes |
 | `DUMP` | `OK` | prints and clears the LittleFS frame log on the USB port |
+
+Version 4 added `BGC` and `SVC` and changed nothing a version 3 app sends;
+`N` and `R` need version 3 or later. A version 2 app cannot read the
+version 3+ `ADV` columns, so flash the app and the bridge together.
 
 ### Census mode
 
 Triple press, or `CENSUS` over the line protocol. For each Govee light in
 range the image records the advertisement (name, model, pact type/code,
-flags, encryption bit), connects, subscribes to `...2b10` and sends the
-reads from the protocol reference: `AA 01` power, `AA 04` brightness,
-`AA 05 01` mode, `AA 06` firmware, `AA 07 03` hardware, `AA 40` IC and
-segment count, `AA 0F` light count, `AA B1` pairing secret (only unpaired
-lights answer), `AA A5 01` segment colour page. With probes enabled
-(`CENSUS PROBE`, triple press with `CENSUS_PROBE_WRITES 1` at the top of the
-sketch, or *Census probes* in the Flipper's Settings) it then writes the
-colour `12 34 56` in each dialect `02` / `0B` / `0D` / `15`, each followed
-by a mode read and `AA A5 01`, notes which ones echoed, and restores the
-power state. Colour and mode are not restored.
+flags, encryption bit), connects, notes which Govee characteristics the
+light exposes (`1910/2b11/2b10/2b12`, or the `ffe0` UART service of the
+H6101/H6104) and reads the raw `2b12` bytes, subscribes to `...2b10` and
+sends the reads from the protocol reference: `AA 01` power, `AA 04`
+brightness, `AA 06` firmware, then, if any of those three answered,
+`AA 05 01` mode, `AA 07 03` hardware, `AA 40` IC and segment count, `AA 0F`
+light count, `AA B1` pairing secret (only unpaired lights answer), `AA A5 01`
+segment colour page. A light that answers none of the first three is
+recorded as `silent` and left alone: three timeouts, not nine. A reply only
+counts when its XOR checksum verifies; a corrupt one is logged as
+`bad_checksum`.
+
+With probes enabled (`CENSUS PROBE`, triple press with `CENSUS_PROBE_WRITES 1`
+at the top of the sketch, or *Census probes* in the Flipper's Settings) it
+then writes a colour in each dialect `02` / `0B` / `0D` / `15`, each followed
+by a mode read and `AA A5 01`. Every dialect has its own probe colour
+(`12 34 56`, `15 37 59`, `13 35 57`, `14 36 58`), and a dialect only counts
+as echoed when *its* colour shows up where it was not showing before, so a
+colour that landed through `02` cannot be credited to `0B` by the page read
+that follows. A light that was off is switched on for the probes and off
+again after. The colour is put back when the pre-probe mode reply named it
+(`02` and `0D` carry RGB); `0B` and `15` replies do not, and scenes and
+music modes are never rewritten, so the summary says `"restored":"power"`
+with a `restore_note` in those cases.
 
 Output on the USB port is one JSON line per frame in the shape of the
 bench rig's log (`tools/govee_rig.py` in Govee-Bluetooth):
@@ -108,17 +128,30 @@ bench rig's log (`tools/govee_rig.py` in Govee-Bluetooth):
 ```
 
 `at` is uptime; the ESP32 has no clock. Notes are `query`, `reply`,
-`timeout`, `unsolicited`, `probe`, `restore`. After each light comes one
-summary line:
+`timeout`, `bad_checksum`, `ack` (a `33 xx` echo with byte 2 = 0, the
+light's own acknowledgement of a write), `ack_error`, `unsolicited`,
+`probe`, `restore`. Frames carrying a pairing secret (`AA B1 01 ...`
+replies, `33 B2` writes) are logged with the secret bytes blanked and
+`"redacted":true`. The session starts with a header line and each light
+ends with one summary line:
 
 ```
-{"summary":"light","address":...,"name":...,"model":...,"rssi":-61,"pact":"10/1","flags":3,"encrypted":false,"dialect":"RGBIC","secret_family":true,"connected":true,"subscribed":true,"silent":false,"power":true,"brightness":100,"submode":"15 010BB800","submode_name":"colour15","firmware":"3.02.24","hardware":"3.01.01","ic_count":0,"segments":15,"secret_present":false,"segment_page":true,"probed":true,"echoed":"15"}
+{"summary":"session","schema":"govee-evidence/1","source":"esp32","software":"govee-party-esp32 0.2 bridge 4","board":"M5STACK_ATOMS3","lights":2,"probe":false}
+{"summary":"light","schema":"govee-evidence/1","source":"esp32","at":"T+14.020","software":"govee-party-esp32 0.2 bridge 4","address":...,"name":...,"model":...,"known_model":true,"rssi":-61,"pact":"10/1","flags":3,"encrypted":false,"dialect":"RGBIC","dialect_source":"pact","secret_family":true,"connected":true,"subscribed":true,"silent":false,"gatt":"1910/2b11/2b10/2b12","bgc":"0100","reads":9,"replies":7,"power":true,"brightness":100,"submode":"15 010BB800","submode_name":"colour15","firmware":"3.02.24","hardware":"3.01.01","ic_count":0,"segments":15,"secret_present":false,"segment_page":true,"probed":true,"echoed":"15","restored":"power","restore_note":"pre-probe colour not readable from the mode reply (0B/15); left on the last probe colour"}
 ```
 
-`silent` means the light connected and subscribed but answered nothing:
-on a `secret_family` model that is the pairing lock. `secret_present`
-reports whether `AA B1` answered; the bytes themselves are only printed
-with `CENSUS_PRINT_SECRET 1`. Encrypted lights are not connected to.
+`silent` means the light connected and subscribed but answered nothing: on
+a `secret_family` model that is the pairing lock, on a light with
+`"encrypted":true` or a non-zero `bgc` it is the cipher, and on an unknown
+model it may just be a dialect this code does not speak. The summary never
+decides which; the report generator in Govee-Bluetooth (`tools/govee_report.py`)
+does, with a confidence. `dialect` is the dialect the party would use and
+`dialect_source` says whether the advertised pact, the model table or the
+unknown-model default chose it. `secret_present` reports whether `AA B1`
+answered; the bytes themselves are only printed with `CENSUS_PRINT_SECRET 1`.
+Lights advertising the encryption bit are connected to for the GATT table
+and the `2b12` bytes only; no frame is sent to them. A button press between
+lights stops a running census.
 
 While no USB host is attached the log is appended to LittleFS
 (`/census.jsonl`, rotated to `/census.old.jsonl` at 96 KB, older data
@@ -128,8 +161,12 @@ there; the ATOM Lite's UART bridge chip cannot, so there the log is always
 stored as well and `DUMP` (on either port) fetches and clears it.
 
 The Flipper app's Census does the same battery through the bridge's `N`
-and `R` commands and writes the same two kinds of line to
-`apps_data/govee_party/census.jsonl` on the SD card.
+and `R` commands and writes the same kinds of line to
+`apps_data/govee_party/census.jsonl` on the SD card, with
+`"source":"dance_party"` and real timestamps from the Flipper's clock.
+Evidence gathered this way earns the 🪩 *Dance Party Certified* badge in the
+generated report: a provenance mark, not a test pass (see
+[docs/evidence.md](docs/evidence.md)).
 
 ## The catch: the Flipper's radio
 
@@ -252,14 +289,24 @@ the family suggests and, with a read path, stops at the first one the light
 echoes back in `AA 05 01`. Scene `33 05 04 <id>` is unchanged.
 
 Only the H6159 and H6181 have been exercised on real hardware by the HA
-project. The read path, the census and the pact parsing have been compiled
-but not yet run against a light. Expect to tweak.
+project. The read path, the census and the pact parsing compile for every
+ESP32 target in CI and the pure-C protocol and census code passes the host
+tests in `tests/host/`, but none of it has yet been run against a light.
+Expect to tweak; [docs/hardware-testing-checklist.md](docs/hardware-testing-checklist.md)
+is the first-power-on plan for the M5Stack boards.
+
+Advertised names are parsed the way the Govee app does it: `ihoment_`,
+`Govee_`, `Minger_` and `GBK_` are followed by `_`-separated SKU and tail,
+while `GVH`-style names carry the SKU letter as their third character
+(`GVH6159_1A2B`, or `GVH600B4F5A` with no separator at all).
 
 ## Files
 
 - `govee_party.c` — UI, worker thread, patterns.
 - `govee_protocol.[ch]` — frames (writes and reads), checksum, manufacturer-data parsing, model → dialect table, HSV.
-- `govee_census.[ch]` — the census read battery and summary JSON, over an abstract write/read pair.
+- `govee_census.[ch]` — the census read battery, probe rules, restoration and summary JSON, over an abstract write/read pair.
+- `tests/host/` — host unit tests for the two files above (`make -C tests/host`); run in CI.
+- `docs/evidence.md`, `docs/hardware-testing-checklist.md` — what the census records and how to first-test the M5Stack boards.
 - `govee_transport.[ch]` — backend interface and light list.
 - `govee_transport_native.c` — `furi_ble/central.h` backend (PR #4436).
 - `govee_transport_uart.c` — ESP32 bridge backend.
