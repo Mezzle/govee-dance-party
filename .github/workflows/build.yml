@@ -91,7 +91,7 @@ jobs:
           esptool.py --chip esp32s3 write_flash 0x0 govee_party-m5stack_atoms3.bin   # ATOMS3 Lite
           esptool.py --chip esp32   write_flash 0x0 govee_party-m5stack_atom.bin     # ATOM Lite
           ```
-          Short press = Dance Party, double = Rave, long = B-Gone, hold at power-on = Lurk. Plug into the Flipper's GPIO header to use it as the bridge.
+          Short press = Dance Party, double = Rave, triple = Census, long = B-Gone, hold at power-on = Lurk. Plug into the Flipper's GPIO header to use it as the bridge.
           MD
       - uses: softprops/action-gh-release@v2
         with:
