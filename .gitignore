@@ -5,3 +5,4 @@ dist/
 .ufbt/
 *.fap
 esp32/**/build/
+tests/host/build/

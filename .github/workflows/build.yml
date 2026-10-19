@@ -11,6 +11,13 @@ permissions:
   contents: write
 
 jobs:
+  host-tests:
+    name: Host unit tests (protocol + census)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make -C tests/host
+
   flipper:
     name: Flipper app (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -71,7 +78,7 @@ jobs:
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [flipper, esp32]
+    needs: [host-tests, flipper, esp32]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
