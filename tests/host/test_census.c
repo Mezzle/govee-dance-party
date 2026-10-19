@@ -5,6 +5,7 @@
  * restoration, bounded reads, JSON shape) can be checked without hardware. */
 
 #include "../../govee_census.h"
+#include "../../generated/govee_frame_vectors_gen.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -220,6 +221,41 @@ static void test_frame_vectors(void) {
     CHECK(strcmp(h, "3305130663000000000000000000000000000040") == 0);
     uint8_t m[GOVEE_MASK_MAX_BYTES];
     CHECK(govee_segment_mask(23, m) == 3 && m[0] == 0xFF && m[1] == 0xFF && m[2] == 0x7F);
+}
+
+/* Every frame protocol.py also builds, byte for byte (generated header). */
+static void test_generated_frame_vectors(void) {
+    uint8_t f[GOVEE_FRAME_LEN];
+    char h[41];
+    size_t n = sizeof(GOVEE_FRAME_VECTORS) / sizeof(GOVEE_FRAME_VECTORS[0]);
+    CHECK(n >= 20);
+    for(size_t i = 0; i < n; i++) {
+        const char* name = GOVEE_FRAME_VECTORS[i].name;
+        bool built = true;
+        if(!strcmp(name, "power_on")) govee_frame_power(f, true);
+        else if(!strcmp(name, "power_off")) govee_frame_power(f, false);
+        else if(!strcmp(name, "brightness_legacy_255")) govee_frame_brightness(f, 100, GoveeDialectLegacy);
+        else if(!strcmp(name, "brightness_percent_100")) govee_frame_brightness(f, 100, GoveeDialectRgbic);
+        else if(!strcmp(name, "rgb_legacy_123456")) govee_frame_rgb_seg(f, 0x12, 0x34, 0x56, GoveeDialectLegacy, 0);
+        else if(!strcmp(name, "rgb_rgbww_123456")) govee_frame_rgb_seg(f, 0x12, 0x34, 0x56, GoveeDialectRgbww, 0);
+        else if(!strcmp(name, "rgb_rgbic_123456_15seg")) govee_frame_rgb_seg(f, 0x12, 0x34, 0x56, GoveeDialectRgbic, 15);
+        else if(!strcmp(name, "rgb_dreamcolor_123456_15seg")) govee_frame_rgb_seg(f, 0x12, 0x34, 0x56, GoveeDialectDreamcolor, 15);
+        else if(!strcmp(name, "scene_blinking")) govee_frame_scene(f, GOVEE_SCENE_BLINKING);
+        else if(!strcmp(name, "read_power")) govee_frame_read_power(f);
+        else if(!strcmp(name, "read_brightness")) govee_frame_read_brightness(f);
+        else if(!strcmp(name, "read_mode")) govee_frame_read_mode(f);
+        else if(!strcmp(name, "read_firmware")) govee_frame_read_firmware(f);
+        else if(!strcmp(name, "read_hardware")) govee_frame_read_hardware(f);
+        else if(!strcmp(name, "read_ic_count")) govee_frame_read_ic_count(f);
+        else if(!strcmp(name, "read_light_count")) govee_frame_read_light_count(f);
+        else if(!strcmp(name, "read_secret")) govee_frame_read_secret(f);
+        else if(!strcmp(name, "read_segment_colors_1")) govee_frame_read_segment_colors(f, 1);
+        else built = false; /* HA-only builders (colour temperature, HA brightness scaling) */
+        if(!built) continue;
+        hex(f, h);
+        if(strcmp(h, GOVEE_FRAME_VECTORS[i].hex) != 0) printf("vector %s: C %s py %s\n", name, h, GOVEE_FRAME_VECTORS[i].hex);
+        CHECK(strcmp(h, GOVEE_FRAME_VECTORS[i].hex) == 0);
+    }
 }
 
 static void test_adv_parse(void) {
@@ -506,6 +542,7 @@ static void test_dialect_source(void) {
 int main(void) {
     test_name_parse();
     test_frame_vectors();
+    test_generated_frame_vectors();
     test_adv_parse();
     test_probe_colours_distinct();
     test_redaction();

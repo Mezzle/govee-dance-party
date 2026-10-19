@@ -63,7 +63,13 @@ from the Library Manager and upload. `govee_frames.h` is a straight port of
 the Flipper app's `govee_protocol.c`; both must track
 `custom_components/govee_bluetooth/protocol.py` in the
 [Govee-Bluetooth](../govee-bluetooth) repo, whose `docs/govee-ble-protocol.md`
-is the source of truth for every frame here. Change one, change all three.
+is the source of truth for every frame here. The model tables are not
+hand-written in either: `generated/govee_models_gen.h` (and its identical
+copy next to the sketch) comes out of `tools/export_fixtures.py` in
+Govee-Bluetooth from `fixtures/govee-models.json`, and
+`generated/govee_frame_vectors_gen.h` carries every frame `protocol.py`
+builds so `make -C tests/host` can compare byte for byte. To take a new
+model: add it to the JSON there, regenerate, copy both headers here.
 
 ### Bridge protocol
 
@@ -305,6 +311,7 @@ while `GVH`-style names carry the SKU letter as their third character
 - `govee_party.c` — UI, worker thread, patterns.
 - `govee_protocol.[ch]` — frames (writes and reads), checksum, manufacturer-data parsing, model → dialect table, HSV.
 - `govee_census.[ch]` — the census read battery, probe rules, restoration and summary JSON, over an abstract write/read pair.
+- `generated/` — model tables and frame vectors exported from Govee-Bluetooth; never edited here.
 - `tests/host/` — host unit tests for the two files above (`make -C tests/host`); run in CI.
 - `docs/evidence.md`, `docs/hardware-testing-checklist.md` — what the census records and how to first-test the M5Stack boards.
 - `govee_transport.[ch]` — backend interface and light list.

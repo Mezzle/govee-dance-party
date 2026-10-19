@@ -417,58 +417,16 @@ static bool in_table(const char* model, const char* const* table, size_t n) {
 }
 #define IN_TABLE(model, table) in_table(model, table, sizeof(table) / sizeof(table[0]))
 
-/* RGBIC strips, TV backlights, bars and panels that speak 33 05 15 on current
- * firmware. Dreamcolor-family members also appear in DREAMCOLOR_MODELS. */
-static const char* const RGBIC_MODELS[] = {
-    "H6143", "H6144", "H619A", "H619B", "H619C", "H619E", "H619Z", "H61A0", "H61A1", "H61A2",
-    "H618A", "H61B5", "H61E1", "H61E5", "H6168", "H6199", "H6052", "H6056", "H6059", "H6061",
-    "H6062", "H6065", "H6072", "H6076", "H617A", "H6198", "H60A0", "H60A1", "H60A4", "H60A6",
-};
-
-/* Families dreamcolorlightv1 / dreamcolorlightv2 / h612526 / barelightv1 /
- * pact_tvlightv2 (YAML 746-758, 841-877, 929-942, 1150-1164): the app's
- * primary colour sub-mode is 0x0B with 0x15 as the modern-pact alternate.
- * Pact type 1 -> 0x0B, pact 2 / 10 -> 0x15 (HGL h6199-pact1). */
-static const char* const DREAMCOLOR_MODELS[] = {
-    "H611A", "H611B", "H611Z", "H6123", "H6125", "H6126", "H612A", "H612B", "H612C", "H612D",
-    "H612E", "H612F", "H6143", "H6144", "H6145", "H6146", "H6147", "H6168", "H6171", "H617A",
-    "H6184", "H6198", "H6199", "H619A", "H61A0", "H61A8", "H61A9", "H61E0", "H61E1", "H70A1",
-    "H70A2", "H70A3",
-};
-
-/* Verified on hardware (H6181, fw 2.03.11): RGBWW 0x0D dialect, brightness 0-100. */
-static const char* const RGBWW_MODELS[] = {"H6181"};
-
-/* The classic Telink-era 0x02 strips, as tabled by the Home Assistant
- * integration (models.py LEGACY_RGB_MODELS). Only the H6159 is hardware
- * verified; the list exists so the census can tell "known legacy" from
- * "never heard of it", both of which get 0x02 by default. */
-static const char* const LEGACY_MODELS[] = {
-    "H6159", "H6110", "H6109", "H614A", "H614B", "H614E", "H6127", "H6107", "H6116", "H6161",
-    "H6129", "H6139", "H6141", "H6142", "H6104", "H6117", "H6125", "H6126", "H6135", "H6137",
-    "H6138", "H6160", "H6163", "H6170", "H6171", "H6172", "H6182", "H6188", "H6195", "H7020",
-    "H7021",
-};
-
-/* Families tagged secret_key_pairing (SPEC 10.1): dreamcolorlightv1, h61d3,
- * stringlightv2, hollowlamp, h60ax, h6047. SKUs that also sit in an untagged
- * legacy family (H6159, H6160, H6109, H6110) are left out: the bench H6159
- * takes writes from anyone. */
-static const char* const SECRET_MODELS[] = {
-    /* dreamcolorlightv1 */
-    "H611B", "H611Z", "H6123", "H612A", "H612B", "H612C", "H612D", "H612E", "H612F", "H6168",
-    "H617A", "H619A", "H61A0", "H61A8", "H61A9", "H61E0", "H61E1", "H70A1", "H70A2", "H70A3",
-    /* h61d3 */
-    "H61B5", "H61E5", "H61D3", "H6640", "H6641",
-    /* stringlightv2 (only the SKUs not also in a legacy family) */
-    "H6141", "H6142", "H6154", "H6170", "H6178", "H6192", "H6195", "H6196", "H6197",
-    /* hollowlamp */
-    "H6050", "H6051", "H6055", "H6058", "H6059", "H6073",
-    /* h60ax */
-    "H60A0", "H60A1", "H60A4", "H60A6", "H60C1",
-    /* h6047 */
-    "H6047", "H6043", "H6042", "H6039", "H6038", "H6048",
-};
+/* The model tables are generated from fixtures/govee-models.json in the
+ * Govee-Bluetooth repository (tools/export_fixtures.py) and vendored as
+ * generated/govee_models_gen.h; the ESP32 sketch carries an identical copy.
+ * Regenerate there, copy both, never edit by hand. */
+#include "generated/govee_models_gen.h"
+#define RGBIC_MODELS GOVEE_GEN_RGBIC_MODELS
+#define DREAMCOLOR_MODELS GOVEE_GEN_DREAMCOLOR_MODELS
+#define RGBWW_MODELS GOVEE_GEN_RGBWW_MODELS
+#define LEGACY_MODELS GOVEE_GEN_LEGACY_MODELS
+#define SECRET_MODELS GOVEE_GEN_SECRET_MODELS
 
 GoveeDialect govee_dialect_for_model(const char* model) {
     if(!model) return GoveeDialectLegacy;

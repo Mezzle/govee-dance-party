@@ -16,6 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Vendored model table is one file in two places
+        run: cmp generated/govee_models_gen.h esp32/govee_party_esp32/govee_models_gen.h
       - run: make -C tests/host
 
   flipper:

@@ -401,40 +401,15 @@ static inline bool goveeInTable(const char* model, const char* const (&table)[N]
     return false;
 }
 
-static const char* const GOVEE_RGBIC[] = {
-    "H6143", "H6144", "H619A", "H619B", "H619C", "H619E", "H619Z", "H61A0", "H61A1", "H61A2",
-    "H618A", "H61B5", "H61E1", "H61E5", "H6168", "H6199", "H6052", "H6056", "H6059", "H6061",
-    "H6062", "H6065", "H6072", "H6076", "H617A", "H6198", "H60A0", "H60A1", "H60A4", "H60A6"};
-
-/* dreamcolorlightv1/v2, h612526, barelightv1, pact_tvlightv2: 0x0B on pact 1,
- * 0x15 on pact 2 / 10 (HGL h6199-pact1). */
-static const char* const GOVEE_DREAMCOLOR[] = {
-    "H611A", "H611B", "H611Z", "H6123", "H6125", "H6126", "H612A", "H612B", "H612C", "H612D",
-    "H612E", "H612F", "H6143", "H6144", "H6145", "H6146", "H6147", "H6168", "H6171", "H617A",
-    "H6184", "H6198", "H6199", "H619A", "H61A0", "H61A8", "H61A9", "H61E0", "H61E1", "H70A1",
-    "H70A2", "H70A3"};
-
-static const char* const GOVEE_RGBWW[] = {"H6181"};
-
-/* Telink-era 0x02 strips as tabled by the HA integration (models.py
- * LEGACY_RGB_MODELS); only the H6159 is hardware verified. Lets the census
- * tell "known legacy" from "never heard of it". */
-static const char* const GOVEE_LEGACY[] = {
-    "H6159", "H6110", "H6109", "H614A", "H614B", "H614E", "H6127", "H6107", "H6116", "H6161",
-    "H6129", "H6139", "H6141", "H6142", "H6104", "H6117", "H6125", "H6126", "H6135", "H6137",
-    "H6138", "H6160", "H6163", "H6170", "H6171", "H6172", "H6182", "H6188", "H6195", "H7020",
-    "H7021"};
-
-/* secret_key_pairing families (SPEC 10.1), minus SKUs that also sit in an
- * untagged legacy family. */
-static const char* const GOVEE_SECRET[] = {
-    "H611B", "H611Z", "H6123", "H612A", "H612B", "H612C", "H612D", "H612E", "H612F", "H6168",
-    "H617A", "H619A", "H61A0", "H61A8", "H61A9", "H61E0", "H61E1", "H70A1", "H70A2", "H70A3",
-    "H61B5", "H61E5", "H61D3", "H6640", "H6641",
-    "H6141", "H6142", "H6154", "H6170", "H6178", "H6192", "H6195", "H6196", "H6197",
-    "H6050", "H6051", "H6055", "H6058", "H6059", "H6073",
-    "H60A0", "H60A1", "H60A4", "H60A6", "H60C1",
-    "H6047", "H6043", "H6042", "H6039", "H6038", "H6048"};
+/* Model tables generated from fixtures/govee-models.json in Govee-Bluetooth
+ * (tools/export_fixtures.py); this copy must be identical to
+ * ../../generated/govee_models_gen.h (CI checks). Never edit by hand. */
+#include "govee_models_gen.h"
+#define GOVEE_RGBIC GOVEE_GEN_RGBIC_MODELS
+#define GOVEE_DREAMCOLOR GOVEE_GEN_DREAMCOLOR_MODELS
+#define GOVEE_RGBWW GOVEE_GEN_RGBWW_MODELS
+#define GOVEE_LEGACY GOVEE_GEN_LEGACY_MODELS
+#define GOVEE_SECRET GOVEE_GEN_SECRET_MODELS
 
 static inline GoveeDialect goveeDialect(const char* model) {
     if(goveeInTable(model, GOVEE_RGBIC)) return GoveeRgbic;
