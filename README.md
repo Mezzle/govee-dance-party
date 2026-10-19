@@ -1,8 +1,9 @@
 <img src="assets/icon.svg" width="64" height="64" alt="">
 
-# Govee Party for Flipper Zero
+# Govee Dance Party
 
 Finds nearby Govee Bluetooth LE lights and makes them dance. Or shuts them up.
+Runs on a Flipper Zero, or on an M5Stack ATOM with nothing else.
 The polite version of this protocol work lives in the
 [Govee-Bluetooth](../govee-bluetooth) Home Assistant integration; this is the
 impolite one.
