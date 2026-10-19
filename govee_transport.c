@@ -77,6 +77,32 @@ void govee_transport_disconnect(GoveeTransport* transport) {
     if(transport) transport->vt->disconnect(transport);
 }
 
+bool govee_transport_can_read(GoveeTransport* transport) {
+    return transport && transport->vt->read && transport->vt->subscribe;
+}
+
+bool govee_transport_subscribe(GoveeTransport* transport) {
+    furi_check(transport);
+    if(!transport->vt->subscribe) {
+        transport->last_error = "No read path";
+        return false;
+    }
+    return transport->vt->subscribe(transport);
+}
+
+bool govee_transport_read(
+    GoveeTransport* transport,
+    const uint8_t request[GOVEE_FRAME_LEN],
+    uint8_t reply[GOVEE_FRAME_LEN],
+    uint32_t timeout_ms) {
+    furi_check(transport);
+    if(!transport->vt->read) {
+        transport->last_error = "No read path";
+        return false;
+    }
+    return transport->vt->read(transport, request, reply, timeout_ms);
+}
+
 const char* govee_transport_last_error(GoveeTransport* transport) {
     return (transport && transport->last_error) ? transport->last_error : "";
 }
@@ -89,12 +115,18 @@ bool govee_light_list_add(
     uint8_t addr_type,
     int8_t rssi,
     const char* name,
-    size_t name_len) {
+    size_t name_len,
+    const GoveeAdvInfo* adv) {
     char model[6];
     if(!govee_name_parse(name, name_len, model, sizeof(model))) return false;
     for(size_t i = 0; i < *count; i++) {
         if(memcmp(lights[i].addr, addr, 6) == 0) {
             lights[i].rssi = rssi;
+            /* A later advertisement may be the first with manufacturer data. */
+            if(adv && adv->valid && !lights[i].adv.valid) {
+                lights[i].adv = *adv;
+                lights[i].dialect = govee_dialect_for_light(lights[i].model, adv);
+            }
             return false;
         }
     }
@@ -108,7 +140,8 @@ bool govee_light_list_add(
     memcpy(l->name, name, n);
     l->name[n] = '\0';
     memcpy(l->model, model, sizeof(model));
-    l->dialect = govee_dialect_for_model(model);
+    if(adv) l->adv = *adv;
+    l->dialect = govee_dialect_for_light(model, adv);
     (*count)++;
     return true;
 }
