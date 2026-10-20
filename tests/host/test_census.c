@@ -42,6 +42,7 @@ typedef struct {
     bool has_page; /* answers AA A5 */
     bool has_secret;
     bool corrupt_mode_reply; /* flip the checksum on AA 05 replies */
+    uint16_t white_kelvin; /* 0D white state, reported with RGB 00 00 00 */
     volatile bool abort;
     int writes;
     uint8_t written[32][GOVEE_FRAME_LEN];
@@ -60,6 +61,7 @@ static bool fake_write(void* ctx, const uint8_t f[GOVEE_FRAME_LEN]) {
     if(f[1] == GOVEE_CMD_BRIGHTNESS) d->brightness = f[2];
     if(f[1] == GOVEE_CMD_MODE && f[2] == govee_dialect_submode(d->speaks)) {
         d->submode = f[2];
+        d->white_kelvin = (f[2] == GOVEE_SUBMODE_COLOR_RGBWW) ? (uint16_t)((f[6] << 8) | f[7]) : 0;
         if(d->speaks == GoveeDialectRgbic) {
             memcpy(d->rgb, &f[4], 3); /* 15 01 R G B */
         } else {
@@ -85,8 +87,12 @@ static bool fake_read(void* ctx, const uint8_t q[GOVEE_FRAME_LEN], uint8_t a[GOV
         return true;
     }
     case GOVEE_CMD_MODE: {
-        uint8_t b[8] = {d->submode};
-        if(d->submode == GOVEE_SUBMODE_COLOR_LEGACY || d->submode == GOVEE_SUBMODE_COLOR_RGBWW) {
+        uint8_t b[9] = {d->submode};
+        if(d->white_kelvin && d->submode == GOVEE_SUBMODE_COLOR_RGBWW) {
+            /* H6006 white: 0D 000000 kHi kLo 000000 */
+            b[4] = (uint8_t)(d->white_kelvin >> 8);
+            b[5] = (uint8_t)d->white_kelvin;
+        } else if(d->submode == GOVEE_SUBMODE_COLOR_LEGACY || d->submode == GOVEE_SUBMODE_COLOR_RGBWW) {
             memcpy(&b[1], d->rgb, 3);
         } else if(d->submode == GOVEE_SUBMODE_COLOR_RGBIC) {
             b[1] = 0x01; /* kelvin 0: colour, no RGB in the reply */
@@ -250,6 +256,16 @@ static void test_generated_frame_vectors(void) {
         else if(!strcmp(name, "read_light_count")) govee_frame_read_light_count(f);
         else if(!strcmp(name, "read_secret")) govee_frame_read_secret(f);
         else if(!strcmp(name, "read_segment_colors_1")) govee_frame_read_segment_colors(f, 1);
+        else if(!strncmp(name, "probe_", 6)) {
+            /* The census probe colours must match census.PROBE_COLORS in Python. */
+            GoveeDialect pd = !strcmp(name, "probe_02") ? GoveeDialectLegacy :
+                              !strcmp(name, "probe_0B") ? GoveeDialectDreamcolor :
+                              !strcmp(name, "probe_0D") ? GoveeDialectRgbww :
+                                                          GoveeDialectRgbic;
+            uint8_t c[3];
+            govee_probe_color(pd, c);
+            govee_frame_rgb_seg(f, c[0], c[1], c[2], pd, 15);
+        }
         else built = false; /* HA-only builders (colour temperature, HA brightness scaling) */
         if(!built) continue;
         hex(f, h);
@@ -414,7 +430,8 @@ static void test_probe_restores_colour_and_power(void) {
     CHECK(!d.power_on);
     CHECK(d.rgb[0] == 0xAA && d.rgb[1] == 0xBB && d.rgb[2] == 0xCC);
     CHECK(r.restored == GoveeCensusRestoredFull && r.restore_note == NULL);
-    CHECK(count_notes(&d, "restore") == 2);
+    /* Three resets to the baseline between dialects, the final colour, power. */
+    CHECK(count_notes(&d, "restore") == 5);
 
     /* An RGBIC light: the pre-probe colour is not readable, say so. */
     Fake e = fake_speaking(GoveeDialectRgbic);
@@ -424,6 +441,28 @@ static void test_probe_restores_colour_and_power(void) {
     govee_census_run(&io, "H617A", true, &r);
     CHECK(r.restored == GoveeCensusRestoredPower && r.restore_note != NULL);
     CHECK(e.power_on);
+}
+
+static void test_white_0d_restored_verbatim(void) {
+    /* The H6006 on the bench: 0D white at 2700 K. An RGB restore would be black. */
+    Fake d = fake_speaking(GoveeDialectRgbww);
+    d.white_kelvin = 2700;
+    GoveeCensusIo io = io_for(&d);
+    GoveeCensusResult r;
+    memset(&r, 0, sizeof(r));
+    r.connected = r.subscribed = true;
+    govee_census_run(&io, "H6006", true, &r);
+    CHECK(r.restored == GoveeCensusRestoredFull);
+    CHECK(d.white_kelvin == 2700);
+    CHECK(d.submode == GOVEE_SUBMODE_COLOR_RGBWW);
+    uint8_t want[GOVEE_FRAME_LEN];
+    uint8_t body[] = {0x0D, 0, 0, 0, 0x0A, 0x8C, 0, 0, 0};
+    govee_frame_build(want, GOVEE_TYPE_WRITE, GOVEE_CMD_MODE, body, sizeof(body));
+    bool found = false;
+    for(int i = 0; i < d.writes && i < 32; i++) {
+        if(memcmp(d.written[i], want, GOVEE_FRAME_LEN) == 0) found = true;
+    }
+    CHECK(found);
 }
 
 static void test_abort_stops_between_reads(void) {
@@ -552,6 +591,7 @@ int main(void) {
     test_probe_echo_is_per_dialect();
     test_probe_ignores_stale_colour();
     test_probe_restores_colour_and_power();
+    test_white_0d_restored_verbatim();
     test_abort_stops_between_reads();
     test_notify_acks();
     test_summary_json();

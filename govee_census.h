@@ -20,6 +20,9 @@
 
 #define GOVEE_CENSUS_READ_TIMEOUT_MS 1500
 #define GOVEE_CENSUS_SETTLE_MS       150
+/* Pause after going back to the baseline between probe dialects, so a person
+ * watching sees it and the reset's own ack lands before the next write. */
+#define GOVEE_CENSUS_RESET_SETTLE_MS 600
 /* After this many consecutive unanswered core reads (power, brightness,
  * firmware) the light is declared silent and the remaining reads are
  * skipped: a locked or foreign-dialect light costs three timeouts, not nine. */
@@ -46,7 +49,7 @@ typedef struct {
     uint8_t brightness;
     bool submode_known;
     uint8_t submode;
-    uint8_t mode_body[4]; /* bytes after the sub-mode in the AA 05 reply */
+    uint8_t mode_body[8]; /* bytes after the sub-mode in the AA 05 reply */
     char firmware[12];
     char hardware[12];
     bool ic_known;

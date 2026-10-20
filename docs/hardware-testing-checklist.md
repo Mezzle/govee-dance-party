@@ -62,7 +62,7 @@ in Govee-Bluetooth consumes (`tools/govee_report.py census.jsonl ...`).
 
 - [ ] Set the light to a known colour in the Govee app, close the app, note the colour.
 - [ ] `CENSUS PROBE`. Watch the strip: which of the four writes visibly changes it? Write that down per dialect; the log cannot see it.
-- [ ] `"echoed"` lists exactly the dialects that visibly changed the strip to *their* probe colour (`02` dark blue 12 34 56, `0B` 15 37 59, `0D` 13 35 57, `15` 14 36 58). A dialect listed that did not visibly change the strip is a false echo: file it with the frame log.
+- [ ] `"echoed"` lists exactly the dialects that visibly changed the strip to *their* probe colour (`02` red, `0B` green, `0D` blue, `15` magenta). A dialect listed that did not visibly change the strip is a false echo: file it with the frame log.
 - [ ] `"restored"`: `full` on a 02/0D light and the original colour is back; `power` on a 0B/15 light with the note, and the strip is on the `15` probe colour.
 - [ ] Repeat with the light off: it switches on for the probes and off again.
 - [ ] Repeat with the light in a scene: `"restored":"power"` with the "not a static colour" note; the scene is gone (expected).
