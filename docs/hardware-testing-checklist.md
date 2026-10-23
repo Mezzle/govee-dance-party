@@ -11,7 +11,7 @@ in Govee-Bluetooth consumes (`tools/govee_report.py census.jsonl ...`).
 
 ## 0. Bench
 
-- [ ] Govee-Bluetooth checkout on the Pi with the rig working (`govee_rig.py scan` lists the lights).
+- [x] Govee-Bluetooth checkout on the Pi with the rig working (`govee_rig.py scan` lists the lights).
 - [ ] This checkout on the laptop with `arduino-cli`, the ESP32 core and NimBLE-Arduino (README).
 - [ ] A serial terminal that can log to a file (`picocom --logfile`, `screen -L`, Arduino's serial monitor with copy-out).
 - [ ] At least one plain light (H6159 or H6181 class) and, if available, one `secret_family` light (H617A/H619A/H61A0 class) and one newer light (H61F6, H1270, H600B class) for the encrypted path.
