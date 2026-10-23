@@ -225,6 +225,10 @@ static void test_frame_vectors(void) {
     govee_frame_music_modern(f, 0x06, 0x63);
     hex(f, h);
     CHECK(strcmp(h, "3305130663000000000000000000000000000040") == 0);
+    /* Scene codes in the app are little-endian 16-bit, not just one byte. */
+    govee_frame_scene(f, 0x1234);
+    hex(f, h);
+    CHECK(strcmp(h, "3305043412000000000000000000000000000014") == 0);
     uint8_t m[GOVEE_MASK_MAX_BYTES];
     CHECK(govee_segment_mask(23, m) == 3 && m[0] == 0xFF && m[1] == 0xFF && m[2] == 0x7F);
 }

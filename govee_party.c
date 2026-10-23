@@ -66,11 +66,14 @@ typedef enum {
     PatternDisco,
     PatternPulse,
     PatternFire,
+    PatternCandy,
+    PatternAurora,
+    PatternHeartbeat,
     PatternCount,
 } Pattern;
 
 static const char* const PATTERN_NAMES[PatternCount] =
-    {"Rainbow", "Strobe", "Police", "Disco", "Pulse", "Fire"};
+    {"Rainbow", "Strobe", "Police", "Disco", "Pulse", "Fire", "Candy", "Aurora", "Heartbeat"};
 
 typedef struct {
     char title[24];
@@ -418,6 +421,26 @@ static void worker_live(App* app) {
             case PatternFire:
                 govee_hsv_to_rgb(rand() % 30, 255, 120 + rand() % 136, &r, &g, &b);
                 break;
+            case PatternCandy:
+                /* Pink, cyan, yellow: a new sweet every two beats. */
+                switch((tick / 2) % 3) {
+                case 0: r = 255; g = 20; b = 147; break;
+                case 1: r = 0; g = 255; b = 255; break;
+                default: r = 255; g = 220; b = 0; break;
+                }
+                break;
+            case PatternAurora:
+                govee_hsv_to_rgb(120 + (tick % 120), 220,
+                    80 + (tick % 32 < 16 ? tick % 32 : 31 - tick % 32) * 11,
+                    &r, &g, &b);
+                break;
+            case PatternHeartbeat: {
+                uint8_t beat = tick % 12;
+                r = (beat == 0 || beat == 3) ? 255 : (beat == 1 || beat == 4) ? 100 : 12;
+                g = 0;
+                b = r / 5;
+                break;
+            }
             default:
                 break;
             }

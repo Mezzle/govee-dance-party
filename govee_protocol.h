@@ -141,7 +141,8 @@ void govee_frame_rgb_seg(
  * LSB first, little-endian across bytes (SPEC BleUtils.makeSelectedTwoBytes).
  * Returns the number of mask bytes written (2 for <= 16 segments). */
 size_t govee_segment_mask(uint8_t segments, uint8_t out[GOVEE_MASK_MAX_BYTES]);
-void govee_frame_scene(uint8_t out[GOVEE_FRAME_LEN], uint8_t scene_id);
+/* The app uses little-endian 16-bit scene codes. */
+void govee_frame_scene(uint8_t out[GOVEE_FRAME_LEN], uint16_t scene_id);
 /* 33 05 01 <mode> 00 R G B (softgrass/govee-api-ble; H6102/H6104/H6127 class). */
 void govee_frame_music(uint8_t out[GOVEE_FRAME_LEN], uint8_t mode, uint8_t r, uint8_t g, uint8_t b);
 /* 33 05 11 <mode> <sensitivity> (dreamcolor SubModeMusicV3; legacy modes 03-06). */

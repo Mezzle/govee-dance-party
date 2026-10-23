@@ -13,7 +13,7 @@ impolite one.
 | Menu | What happens |
 | --- | --- |
 | **Dance Party!** | Scans, then visits every Govee light in range: power on, brightness 100 %, a few colour pops, then the blinking scene and the mic-driven *energic* music mode. The light keeps partying after the Flipper walks away. |
-| **Live DJ** | Pick one light and stream patterns to it: Rainbow, Strobe, Police, Disco, Pulse, Fire. Left/Right changes the pattern, Up/Down the speed, OK holds the current colour. The Flipper's own LED mirrors the colour. |
+| **Live DJ** | Pick one light and stream patterns to it: Rainbow, Strobe, Police, Disco, Pulse, Fire, Candy, Aurora, Heartbeat. Left/Right changes the pattern, Up/Down the speed, OK holds the current colour. The Flipper's own LED mirrors the colour. |
 | **Govee B-Gone** | Scans, then turns every Govee light in range off. With *B-Gone lurks* on in Settings it keeps rescanning and switching off anything that dares come back on, until you press Back. |
 | **Census** | Scans, then visits every light and asks what it speaks: firmware, hardware, current mode, segment count, whether it still hands out its pairing secret. Nothing is written unless *Census probes* is on in Settings. Results go on screen and to `apps_data/govee_party/census.jsonl` as `govee-evidence/1` records (see [docs/evidence.md](docs/evidence.md)). Needs the ESP32 bridge (v3 or later). |
 
@@ -40,7 +40,7 @@ ATOMS3 Lite (any ESP32 with Bluetooth works) that does two jobs at once:
   | Press | Does |
   | --- | --- |
   | short | Dance Party: every Govee light in range on, 100 %, colour pops, blinking scene, music mode |
-  | double | Rave: toggles a streamed rainbow/strobe show that hops between the lights in range |
+  | double | Rave: toggles a streamed rainbow/strobe/candy/aurora show that hops between the lights in range |
   | triple | Census: catalogue every light in range (see below) |
   | long | Govee B-Gone: every light in range off |
   | held at power-on | Lurk: rescan every ten seconds and switch off anything that is on, until the button is pressed |
@@ -292,10 +292,11 @@ the app uses on the H6102/H6104/H6127 class only; the modern RGBIC stack
 wants `33 05 13 <code> <sensitivity>` and dreamcolor `33 05 11 <mode>
 <sensitivity>`. The party now tries `13`, then `11`, then `01` in the order
 the family suggests and, with a read path, stops at the first one the light
-echoes back in `AA 05 01`. Scene `33 05 04 <id>` is unchanged.
+echoes back in `AA 05 01`. Scene IDs use `33 05 04 <id-low> <id-high>` (a little-endian 16-bit code); the blinking scene remains `0x0008`.
 
-Only the H6159 and H6181 have been exercised on real hardware by the HA
-project. The read path, the census and the pact parsing compile for every
+The HA project has exercised H6159, H6181 and H6006 on real hardware.
+The H6006 needs writes without response and does not run the legacy scenes;
+Live DJ and standalone Rave stream colours without relying on those scenes. The read path, the census and the pact parsing compile for every
 ESP32 target in CI and the pure-C protocol and census code passes the host
 tests in `tests/host/`, but none of it has yet been run against a light.
 Expect to tweak; [docs/hardware-testing-checklist.md](docs/hardware-testing-checklist.md)
@@ -318,3 +319,14 @@ while `GVH`-style names carry the SKU letter as their third character
 - `govee_transport_native.c` — `furi_ble/central.h` backend (PR #4436).
 - `govee_transport_uart.c` — ESP32 bridge backend.
 - `esp32/govee_party_esp32/` — the ESP32 image: Flipper bridge plus standalone button mode.
+
+## Sister-repo sync
+
+Protocol and generated fixtures synced with Govee-Bluetooth `0bf1400`.
+The ESP32 bridge selects a supported GATT write procedure: it honours the
+requested procedure when available, falls back to the other when required,
+and refuses a control characteristic that offers neither. This also covers
+streamed colours on lights that only support writes with response. Scene
+builders on Flipper and ESP32 preserve both bytes of the app's scene IDs.
+The exported model memberships and existing frame vectors are unchanged;
+the regenerated headers record the current source commit.
