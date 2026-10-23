@@ -148,9 +148,9 @@ static inline void goveeRgb(uint8_t out[20], uint8_t r, uint8_t g, uint8_t b, Go
     goveeRgbSeg(out, r, g, b, d, 0);
 }
 
-static inline void goveeScene(uint8_t out[20], uint8_t id) {
-    uint8_t p[] = {GOVEE_SUBMODE_SCENE, id};
-    goveeBuild(out, GOVEE_TYPE_WRITE, GOVEE_CMD_MODE, p, 2);
+static inline void goveeScene(uint8_t out[20], uint16_t id) {
+    uint8_t p[] = {GOVEE_SUBMODE_SCENE, (uint8_t)id, (uint8_t)(id >> 8)};
+    goveeBuild(out, GOVEE_TYPE_WRITE, GOVEE_CMD_MODE, p, sizeof(p));
 }
 
 /* 33 05 01 <mode> 00 R G B (softgrass; H6102/H6104/H6127 class). */

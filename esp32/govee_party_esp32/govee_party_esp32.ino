@@ -211,6 +211,7 @@ static bool subscribed = false;
 /* Whether 2b11 takes write requests. The H6006 (and H6004 per egold555)
  * offer write-without-response only, refuse a request and drop the link. */
 static bool controlWithResponse = true;
+static bool controlWithoutResponse = false;
 static volatile bool scanning = false;
 static bool bridgeScan = false; /* scan was requested by the Flipper: stream ADV lines */
 static bool bridgeSession = false; /* Flipper owns the connection */
@@ -518,6 +519,13 @@ static const char* connectLight(const NimBLEAddress& addr) {
         return "no govee service";
     }
     controlWithResponse = control->canWrite();
+    controlWithoutResponse = control->canWriteNoResponse();
+    if(!controlWithResponse && !controlWithoutResponse) {
+        client->disconnect();
+        control = nullptr;
+        status = nullptr;
+        return "control not writable";
+    }
     led(0, 40, 0);
     return nullptr;
 }
@@ -545,7 +553,7 @@ static const char* subscribeStatus() {
 
 static bool send(const uint8_t frame[20], bool withResponse = true) {
     if(!connected()) return false;
-    bool ok = control->writeValue(frame, 20, withResponse && controlWithResponse);
+    bool ok = control->writeValue(frame, 20, controlWithResponse && (withResponse || !controlWithoutResponse));
     delay(60);
     return ok;
 }
@@ -674,8 +682,8 @@ static void bridgeWrite(const String& hex, bool withResponse) {
         reply("ERR bad hex");
         return;
     }
-    /* "W ... R" asks for a write request; downgrade where 2b11 refuses one. */
-    if(control->writeValue(frame, 20, withResponse && controlWithResponse)) {
+    /* Honour the requested procedure when supported; otherwise use the other. */
+    if(control->writeValue(frame, 20, controlWithResponse && (withResponse || !controlWithoutResponse))) {
         reply("OK");
     } else {
         reply(client->isConnected() ? "ERR write failed" : "ERR disconnected");
@@ -913,7 +921,7 @@ static void sweep(void (*visit)(Light&)) {
     ledIdle();
 }
 
-/* Rave: hop between lights, streaming a rainbow/strobe show to each for a
+/* Rave: hop between lights, streaming a rainbow/strobe/candy/aurora show to each for a
  * few seconds. Any button press ends it. */
 static void rave() {
     uint16_t hue = 0;
@@ -952,11 +960,26 @@ static void rave() {
         unsigned long until = millis() + 6000;
         uint32_t tick = 0;
         while(millis() < until && raving) {
-            if((tick / 40) & 1) { /* alternate: 40 frames rainbow, 40 frames strobe */
+            /* Carry the show across visits so each light gets a different opening. */
+            switch(((idx - 1) + tick / 40) % 4) {
+            case 0:
                 hsvToRgb(hue, 255, 255, r, g, b);
                 hue = (hue + 14) % 360;
-            } else {
+                break;
+            case 1:
                 r = g = b = (tick & 1) ? 255 : 1;
+                break;
+            case 2: /* candy */
+                switch((tick / 4) % 3) {
+                case 0: r = 255; g = 20; b = 147; break;
+                case 1: r = 0; g = 255; b = 255; break;
+                default: r = 255; g = 220; b = 0; break;
+                }
+                break;
+            default: /* aurora */
+                hsvToRgb(120 + tick % 120, 220,
+                    80 + (tick % 32 < 16 ? tick % 32 : 31 - tick % 32) * 11, r, g, b);
+                break;
             }
             goveeRgbSeg(f, r, g, b, l.dialect, l.segments);
             send(f, false);

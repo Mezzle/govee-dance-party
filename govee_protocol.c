@@ -112,8 +112,8 @@ void govee_frame_rgb(uint8_t out[GOVEE_FRAME_LEN], uint8_t r, uint8_t g, uint8_t
     govee_frame_rgb_seg(out, r, g, b, dialect, 0);
 }
 
-void govee_frame_scene(uint8_t out[GOVEE_FRAME_LEN], uint8_t scene_id) {
-    uint8_t p[] = {GOVEE_SUBMODE_SCENE, scene_id};
+void govee_frame_scene(uint8_t out[GOVEE_FRAME_LEN], uint16_t scene_id) {
+    uint8_t p[] = {GOVEE_SUBMODE_SCENE, (uint8_t)scene_id, (uint8_t)(scene_id >> 8)};
     govee_frame_build(out, GOVEE_TYPE_WRITE, GOVEE_CMD_MODE, p, sizeof(p));
 }
 
