@@ -1343,7 +1343,13 @@ static void lurkCycle() {
 void setup() {
     Serial.begin(115200);
     flipperSerial.begin(BRIDGE_BAUD, SERIAL_8N1, BRIDGE_RX_PIN, BRIDGE_TX_PIN);
+    // Classic ESP32 GPIO34-39 have no internal pull-up; the M5Stack
+    // buttons on these pins use the board's external pull-up instead.
+#if CONFIG_IDF_TARGET_ESP32 && BUTTON_PIN >= 34 && BUTTON_PIN <= 39
+    pinMode(BUTTON_PIN, INPUT);
+#else
     pinMode(BUTTON_PIN, INPUT_PULLUP);
+#endif
     if(!LittleFS.begin(true)) Serial.println("LittleFS unavailable: census log will not be stored");
     NimBLEDevice::init("");
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);
