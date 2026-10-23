@@ -257,9 +257,17 @@ gracefully rather than hanging the radio.
 
 ## Releases
 
+**[Install from your browser](https://mezzle.github.io/govee-dance-party/)** —
+choose your ESP32 / M5Stack board and connect over USB. The page also has
+Flipper app downloads and wiring instructions. Use desktop Chrome or Edge
+for browser flashing; manual downloads remain available.
+
+
 Every push builds the Flipper app (Momentum and official SDKs) and the ESP32
 images in GitHub Actions. Tagging `v*` publishes them as a release with
-ready-to-flash `.fap` and merged `.bin` files.
+ready-to-flash `.fap` and merged `.bin` files, then deploys the flasher to
+GitHub Pages using those exact release assets. To redeploy an existing release,
+run **Publish flasher** with its tag (or leave blank for the latest release).
 
 ## Building the app
 

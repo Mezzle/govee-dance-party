@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Install Govee Dance Party on an ESP32 or M5Stack, and download the Flipper Zero app.">
+<title>Govee Dance Party · Install</title>
+<style>
+:root { color-scheme: dark; font-family: system-ui, sans-serif; background:#11121b; color:#f4f2ff; line-height:1.6; }
+body { max-width:850px; margin:0 auto; padding:40px 24px 64px; }
+.eyebrow { color:#b7a5ff; text-transform:uppercase; letter-spacing:.16em; font-size:.8rem; font-weight:700; }
+h1 { font-size:clamp(2.5rem,7vw,4rem); line-height:1.05; letter-spacing:-.05em; margin:18px 0; }
+h2 { line-height:1.2; } p { color:#c9c7dc; } a { color:#c8b5ff; text-underline-offset:4px; }
+section { background:#1c1d2b; border:1px solid #353448; border-radius:18px; padding:26px; margin:24px 0; }
+label { display:block; font-weight:600; margin-bottom:8px; }
+select,button,.download { font:inherit; border-radius:8px; padding:12px 16px; }
+select { display:block; width:100%; background:#11121b; color:inherit; border:1px solid #666079; margin-bottom:18px; }
+button,.download { display:inline-block; background:#c5b1ff; color:#201532; border:0; font-weight:650; cursor:pointer; text-decoration:none; }
+button:disabled { opacity:.5; cursor:wait; } :focus-visible { outline:3px solid #fff; outline-offset:4px; }
+.download { margin:4px 8px 4px 0; } .small { font-size:.9rem; } code { background:#11121b; padding:2px 5px; border-radius:4px; overflow-wrap:anywhere; }
+#status { color:#e3d6ff; } footer { font-size:.9rem; } esp-web-install-button:not(:defined) { display:none; }
+</style>
+<script type="module" src="https://unpkg.com/esp-web-tools@10.1.1/dist/web/install-button.js?module"></script>
+</head>
+<body>
+<header><div class="eyebrow">No pairing. No cloud. Just lights.</div><h1>Govee Dance Party</h1><p>A pocket party box. An ESP32 bridge. A Flipper sidekick.<br>Plug in your board and get the lights moving.</p><p id="status" role="status">Loading release…</p></header>
+<section aria-labelledby="esp-title">
+<h2 id="esp-title">1. Install the ESP32 image</h2>
+<p>One image runs standalone with the board’s button, or acts as a Bluetooth bridge for your Flipper Zero.</p>
+<label for="board">Choose your exact board</label>
+<select id="board">
+<option value="m5stack_atoms3">M5Stack ATOMS3 Lite · ESP32-S3</option>
+<option value="m5stack_atom">M5Stack ATOM Lite · ESP32</option>
+<option value="esp32">Generic ESP32</option>
+<option value="esp32c3">Generic ESP32-C3</option>
+<option value="esp32s3">Generic ESP32-S3</option>
+</select>
+<p id="pins" class="small"></p>
+<esp-web-install-button id="installer" manifest="firmware/m5stack_atoms3.json">
+<button slot="activate" id="install" disabled>Connect &amp; install</button>
+<p slot="unsupported">Browser flashing needs Web Serial. Try desktop Chrome or Edge, or download the image below and use esptool.</p>
+<p slot="not-allowed">Open this page over HTTPS to enable browser flashing.</p>
+</esp-web-install-button>
+<p class="small">Use a USB data cable and close other serial apps. Installation replaces the board’s current firmware; erasing also clears saved census logs. If connection fails, hold BOOT while connecting, then release it. The Flipper Wi-Fi Devboard (ESP32-S2) has no Bluetooth and is unsupported.</p>
+<a id="binary" href="firmware/govee_party-m5stack_atoms3.bin" download>Download merged image</a>
+<p class="small">Manual flashing: write the merged image at <code>0x0</code> with <a href="https://docs.espressif.com/projects/esptool/en/latest/esp32/">esptool</a>. Generic boards may need UART pins adjusted in a source build.</p>
+<noscript><p>Enable JavaScript for board selection, or download images from <a href="https://github.com/Mezzle/govee-dance-party/releases/latest">GitHub Releases</a>.</p></noscript>
+</section>
+<section aria-labelledby="flipper-title">
+<h2 id="flipper-title">2. Add the Flipper app</h2>
+<p>Choose the app matching your Flipper firmware, then copy the <code>.fap</code> file to <code>SD Card/apps/Bluetooth/</code> using qFlipper’s file manager. Open it from Apps → Bluetooth.</p>
+<a class="download" href="firmware/govee_party-momentum.fap" download>Momentum app ↓</a>
+<a class="download" href="firmware/govee_party-official.fap" download>Official app ↓</a>
+<p class="small"><a href="https://flipper.net/qflipper">Get qFlipper</a> · <a href="https://lab.flipper.net/">Open Flipper Lab</a></p>
+<p>Wire the ESP32 to the GPIO header and select <strong>Settings → Radio → ESP32 bridge</strong>. Flipper TX (pin 13) goes to board RX; Flipper RX (pin 14) goes to board TX. Connect 5V (pin 1) and GND (pin 8, 11 or 18).</p>
+<p class="small">Stock Flipper Bluetooth cannot control lights directly. See the <a href="https://github.com/Mezzle/govee-dance-party#option-a-esp32-bridge-works-on-any-firmware-including-momentum">board wiring guide</a> for details. If an app reports an API mismatch, use a compatible firmware release or rebuild against your SDK.</p>
+</section>
+<section><h2>Unplug. Press. Party.</h2><p>Short press: <strong>Dance Party</strong> · Double: <strong>Rave</strong> · Triple: <strong>Census</strong> · Long: <strong>B-Gone</strong> · Hold at power-on: <strong>Lurk</strong>.</p><p class="small">Use on lights you own or have permission to control. Hardware validation is still in progress; see the <a href="https://github.com/Mezzle/govee-dance-party/blob/main/docs/hardware-testing-checklist.md">testing checklist</a>.</p></section>
+<footer><a href="https://github.com/Mezzle/govee-dance-party">Source &amp; full guide</a> · <a id="release" href="https://github.com/Mezzle/govee-dance-party/releases/latest">Release assets</a> · Powered by <a href="https://esphome.github.io/esp-web-tools/">ESP Web Tools</a></footer>
+<script>
+const board = document.querySelector('#board');
+const pins = {m5stack_atoms3:'Grove UART: RX G2, TX G1.',m5stack_atom:'Grove UART: RX G26, TX G32.',esp32:'Default UART: RX 16, TX 17.',esp32c3:'Default UART: RX 20, TX 21.',esp32s3:'Default UART: RX 44, TX 43.'};
+function selectBoard() {
+  document.querySelector('#installer').setAttribute('manifest', `firmware/${board.value}.json`);
+  document.querySelector('#binary').href = `firmware/govee_party-${board.value}.bin`;
+  document.querySelector('#pins').textContent = pins[board.value];
+}
+board.addEventListener('change', selectBoard);
+selectBoard();
+fetch('release.json').then(response => { if (!response.ok) throw new Error('Release unavailable'); return response.json(); }).then(({version}) => {
+  document.querySelector('#status').textContent = `Ready to install · ${version}`;
+  document.querySelector('#release').href = `https://github.com/Mezzle/govee-dance-party/releases/tag/${encodeURIComponent(version)}`;
+  customElements.whenDefined('esp-web-install-button').then(() => { document.querySelector('#install').disabled = false; });
+}).catch(() => { document.querySelector('#status').textContent = 'Release files unavailable. Please use GitHub Releases or try again later.'; });
+setTimeout(() => { if (!customElements.get('esp-web-install-button')) document.querySelector('#status').textContent = 'Browser installer could not load. Use the downloads below, or reload to retry.'; }, 15000);
+</script>
+</body>
+</html>

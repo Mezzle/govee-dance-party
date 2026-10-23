@@ -6,3 +6,6 @@ dist/
 *.fap
 esp32/**/build/
 tests/host/build/
+__pycache__/
+_site/
+release-assets/
