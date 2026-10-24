@@ -36,11 +36,11 @@ them.
 | `power`, `brightness`, `submode`, `firmware`, `hardware`, `ic_count`, `segments`, `light_count`, `segment_page` | protocol | each is a verified reply to its own read |
 | `secret_present` | protocol | `AA B1` answered with `01`: the light is unbound and hands out its secret; `false` means it did not answer, which bound lights and plain lights both do |
 | `acks` | protocol | `33 xx` echoes with byte 2 = 0, the firmware's own write acknowledgement |
-| `echoed` | application | the dialect's own probe colour appeared in the mode reply or the segment page after the write, and was not showing before |
+| `echoed` | application | the dialect's own probe colour appeared in a matching `02`/`0D` mode reply after the write, and was not showing before |
 | `restored`, `restore_note` | housekeeping | whether the light was put back; never a capability claim |
 
 What no field proves: that the light *looked* right. A probe that echoed
-`15` shows the firmware stored the colour in that dialect; whether every
+`02` or `0D` shows the firmware reported the colour in that dialect; whether every
 segment lit is for the operator's eyes and the hardware checklist. The
 report generator marks such conclusions `observed` only when a human
 entered them.
@@ -50,11 +50,16 @@ entered them.
 | summary | likely reading | still open |
 | --- | --- | --- |
 | `silent:true`, `secret_family:true`, `secret_present:false` | the pairing lock: writes and reads are ignored until `33 B2 <secret>` | a foreign dialect would look the same |
-| `silent:true`, `encrypted:true` or `bgc` with a non-zero version byte | AES-wrapped link; plaintext frames are discarded | which cipher (V1 ECB+RC4 or V2 GCM) needs a handshake attempt |
+| `silent:true`, `encrypted:true` or `bgc` with a known non-zero encryption version | AES-wrapped link; plaintext frames are discarded | which cipher (V1 ECB+RC4 or V2 GCM) needs a handshake attempt |
 | `silent:true`, `known_model:false`, no encryption signs | an unknown SKU that may speak on another characteristic or need the secret | everything |
 | `subscribed:false` | the status characteristic was missing or refused notifications; the `gatt` field says which | H6101/H6104 (`ffe0`) land here |
-| `echoed:"15"` on a model tabled `0B` | the pact decided, and it was right | brightness scale, segment count |
-| `echoed:""` with `probed:true` | none of the four colour layouts changed the light's reported colour | the light may be in a mode that overrides colour, or need Form B of `0B` |
+| `segment_page:true` | a checksum-valid A5 reply was received; its colour layout is unqualified | record geometry and colour meaning |
+| `echoed:""` with `probed:true` | no colour echo was confirmed | `0B`/`15` mode replies carry no RGB; raw A5 bytes cannot confirm it |
+
+BGC byte 0 is a format discriminator. Byte 1 carries the encryption version
+for format 1 (minimum two bytes) and format 2 (minimum six bytes). `01 00`
+is version 0. Short, absent or unknown formats do not establish plaintext,
+encryption or pairing state. The census preserves the raw bytes.
 
 ## Secrets
 
@@ -83,8 +88,11 @@ one of them, the findings reflect all of them.
   Scenes, music modes and `0B`/`15` colours are not restored.
 - Only Form A of the `0B` layout is tried (`0B R G B mask0 mask1`); the
   H6199 pact-1 producer's Form B (`0B R G B kHi kLo mask0 mask1`) is not.
-- `AA A5 01` is read for one page only; segment counts above the page size
-  are not confirmed.
+- `AA A5 01` is read for one page only and kept raw. Without a qualified
+  model/pact/firmware layout it is never used as colour-echo evidence.
+- Reported topology does not qualify segment-to-mask mapping. Colour writes
+  keep the default 15-segment mask; full coverage on other geometries is
+  unverified. Census counts do not change later standalone party/rave writes.
 - The ESP32 drops notifications that are not 20 bytes (encrypted V2 frames
   are longer); it only counts them (`odd_notifies`).
 - No handshake is attempted on encrypted lights. The plan and test vectors

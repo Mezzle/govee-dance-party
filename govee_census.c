@@ -88,7 +88,6 @@ static bool original_restorable(const GoveeCensusResult* r, GoveeDialect* dialec
 static void census_probe(const GoveeCensusIo* io, GoveeCensusResult* r) {
     uint8_t q[GOVEE_FRAME_LEN], a[GOVEE_FRAME_LEN], f[GOVEE_FRAME_LEN];
     r->probed = true;
-    uint8_t segments = (r->ic_known && r->segments) ? r->segments : 0;
 
     /* Mode writes on a powered-off light may not be reflected by the mode
      * read; switch on for the duration and switch off again after. */
@@ -98,9 +97,6 @@ static void census_probe(const GoveeCensusIo* io, GoveeCensusResult* r) {
         census_write(io, f, "probe");
     }
 
-    uint8_t page[GOVEE_FRAME_LEN];
-    bool have_page = r->segment_page;
-    if(have_page) memcpy(page, r->page_before, GOVEE_FRAME_LEN);
     uint8_t last_mode_rgb[3] = {0, 0, 0};
     bool have_mode_rgb = r->submode_known && govee_submode_is_color(r->submode);
     if(have_mode_rgb) memcpy(last_mode_rgb, r->mode_body, 3);
@@ -111,10 +107,10 @@ static void census_probe(const GoveeCensusIo* io, GoveeCensusResult* r) {
         uint8_t rgb[3];
         govee_probe_color(d, rgb);
         /* Stale-state guard: the colour must not already be showing. */
-        bool stale_page = have_page && govee_reply_segment_page_has(page, rgb[0], rgb[1], rgb[2]);
         bool stale_mode = have_mode_rgb && memcmp(last_mode_rgb, rgb, 3) == 0;
 
-        govee_frame_rgb_seg(f, rgb[0], rgb[1], rgb[2], d, segments);
+        /* Reported topology does not qualify a segment-to-mask mapping. */
+        govee_frame_rgb(f, rgb[0], rgb[1], rgb[2], d);
         census_write(io, f, "probe");
         bool echoed = false;
         govee_frame_read_mode(q);
@@ -129,11 +125,9 @@ static void census_probe(const GoveeCensusIo* io, GoveeCensusResult* r) {
             memcpy(last_mode_rgb, &a[3], 3);
         }
         govee_frame_read_segment_colors(q, 1);
-        if(census_read(io, q, a, r)) {
-            if(govee_reply_segment_page_has(a, rgb[0], rgb[1], rgb[2]) && !stale_page) echoed = true;
-            memcpy(page, a, GOVEE_FRAME_LEN);
-            have_page = true;
-        }
+        /* Preserve the raw reply in the frame log. No page geometry is
+         * qualified here, so matching bytes cannot establish a colour echo. */
+        census_read(io, q, a, r);
         if(echoed) r->echoed |= (uint8_t)(1u << d);
         /* Back to the starting state between dialects, so each one is
          * judged from the same baseline (by eye and by read-back). */
