@@ -169,9 +169,6 @@ void govee_frame_read_segment_colors(uint8_t out[GOVEE_FRAME_LEN], uint8_t group
 bool govee_frame_read_matches(const uint8_t request[GOVEE_FRAME_LEN], const uint8_t reply[GOVEE_FRAME_LEN]);
 /* Pulls the NUL/space terminated ASCII out of an AA 06 / AA 07 03 reply. */
 void govee_reply_version_string(const uint8_t reply[GOVEE_FRAME_LEN], char* out, size_t out_size);
-/* True if an AA A5 page carries the probe colour in any [bri R G B] or
- * [R G B] record. */
-bool govee_reply_segment_page_has(const uint8_t reply[GOVEE_FRAME_LEN], uint8_t r, uint8_t g, uint8_t b);
 /* Short human reading of a frame for logs. `from_light` tells a read request
  * ("read mode") from its reply ("mode colour15 ..."); the bytes alone cannot. */
 void govee_frame_describe(const uint8_t frame[GOVEE_FRAME_LEN], bool from_light, char* out, size_t out_size);

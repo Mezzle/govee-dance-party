@@ -117,11 +117,12 @@ With probes enabled (`CENSUS PROBE`, triple press with `CENSUS_PROBE_WRITES 1`
 at the top of the sketch, or *Census probes* in the Flipper's Settings) it
 then writes a colour in each dialect `02` / `0B` / `0D` / `15`, each followed
 by a mode read and `AA A5 01`. Every dialect has its own probe colour
-(red `C8 1E 28` for `02`, green `1E C8 3C` for `0B`, blue `28 3C C8` for `0D`, magenta `B4 1E C8` for `15`, saturated so a person can tell them apart), and a dialect only counts
-as echoed when *its* colour shows up where it was not showing before, so a
-colour that landed through `02` cannot be credited to `0B` by the page read
-that follows. A light that was off is switched on for the probes and off
-again after. The colour is put back when the pre-probe mode reply named it
+(red `C8 1E 28` for `02`, green `1E C8 3C` for `0B`, blue `28 3C C8` for `0D`, magenta `B4 1E C8` for `15`, saturated so a person can tell them apart), and a
+colour echo is currently confirmed only by a matching `02` or `0D` mode
+reply. A5 pages are retained as raw frame evidence and do not confirm a
+colour until a model/pact/firmware-qualified layout is implemented. An empty
+`echoed` value therefore does not mean the write failed. A light that was
+off is switched on for the probes and off again after. The colour is put back when the pre-probe mode reply named it
 (`02` and `0D` carry RGB); `0B` and `15` replies do not, and scenes and
 music modes are never rewritten, so the summary says `"restored":"power"`
 with a `restore_note` in those cases.
@@ -143,18 +144,28 @@ ends with one summary line:
 
 ```
 {"summary":"session","schema":"govee-evidence/1","source":"esp32","software":"govee-party-esp32 0.2 bridge 4","board":"M5STACK_ATOMS3","lights":2,"probe":false}
-{"summary":"light","schema":"govee-evidence/1","source":"esp32","at":"T+14.020","software":"govee-party-esp32 0.2 bridge 4","address":...,"name":...,"model":...,"known_model":true,"rssi":-61,"pact":"10/1","flags":3,"encrypted":false,"dialect":"RGBIC","dialect_source":"pact","secret_family":true,"connected":true,"subscribed":true,"silent":false,"gatt":"1910/2b11/2b10/2b12","bgc":"0100","reads":9,"replies":7,"power":true,"brightness":100,"submode":"15 010BB800","submode_name":"colour15","firmware":"3.02.24","hardware":"3.01.01","ic_count":0,"segments":15,"secret_present":false,"segment_page":true,"probed":true,"echoed":"15","restored":"power","restore_note":"pre-probe colour not readable from the mode reply (0B/15); left on the last probe colour"}
+{"summary":"light","schema":"govee-evidence/1","source":"esp32","at":"T+14.020","software":"govee-party-esp32 0.2 bridge 4","address":...,"name":...,"model":...,"known_model":true,"rssi":-61,"pact":"10/1","flags":3,"encrypted":false,"dialect":"RGBIC","dialect_source":"pact","secret_family":true,"connected":true,"subscribed":true,"silent":false,"gatt":"1910/2b11/2b10/2b12","bgc":"0100","reads":9,"replies":7,"power":true,"brightness":100,"submode":"15 010BB800","submode_name":"colour15","firmware":"3.02.24","hardware":"3.01.01","ic_count":0,"segments":15,"secret_present":false,"segment_page":true,"probed":true,"echoed":"","restored":"power","restore_note":"pre-probe colour not readable from the mode reply (0B/15); left on the last probe colour"}
 ```
 
 `silent` means the light connected and subscribed but answered nothing: on
 a `secret_family` model that is the pairing lock, on a light with
-`"encrypted":true` or a non-zero `bgc` it is the cipher, and on an unknown
-model it may just be a dialect this code does not speak. The summary never
+`"encrypted":true` or a known non-zero BGC encryption version it may be
+the cipher, and on an unknown model it may just be a dialect this code
+does not speak. The summary never
 decides which; the report generator in Govee-Bluetooth (`tools/govee_report.py`)
 does, with a confidence. `dialect` is the dialect the party would use and
 `dialect_source` says whether the advertised pact, the model table or the
 unknown-model default chose it. `secret_present` reports whether `AA B1`
 answered; the bytes themselves are only printed with `CENSUS_PRINT_SECRET 1`.
+
+BGC begins with a format discriminator, not the encryption version. For
+format 1 (at least two bytes) or format 2 (at least six bytes), byte 1 is
+the version: `01 00` means version 0, not encryption. Short, absent or
+unknown formats remain unknown. Reported topology counts stay evidence;
+they do not select colour-write masks. Writes retain the default 15-segment
+mask until a model-specific mapping is qualified, so full coverage on other
+segment geometries is not established.
+
 Lights advertising the encryption bit are connected to for the GATT table
 and the `2b12` bytes only; no frame is sent to them. A button press between
 lights stops a running census.
@@ -292,10 +303,10 @@ advertised name is ported from the Home Assistant integration
 and friends) the advertised pact decides instead: pact type 1 speaks `0B`,
 pact 2 and 10 speak `15`.
 
-Two things the research corrected. The whole-strip mask `FF 7F` is only
-right for 15 segments (13 panels want `FF 1F`), so the mask is now sized from
-the `AA 40` reply when the light answers it. And the music sub-mode byte is
-per family: the softgrass `33 05 01 <mode>` the party used to send is what
+The default mask `FF 7F` addresses 15 segment bits. An `AA 40` count alone
+does not qualify how those bits map to a model; it is recorded as evidence
+and does not resize writes. Full-strip coverage on other geometries needs
+a qualified mapping. The music sub-mode byte is per family: the softgrass `33 05 01 <mode>` the party used to send is what
 the app uses on the H6102/H6104/H6127 class only; the modern RGBIC stack
 wants `33 05 13 <code> <sensitivity>` and dreamcolor `33 05 11 <mode>
 <sensitivity>`. The party now tries `13`, then `11`, then `01` in the order
