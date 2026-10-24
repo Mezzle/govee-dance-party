@@ -211,16 +211,6 @@ void govee_reply_version_string(const uint8_t reply[GOVEE_FRAME_LEN], char* out,
     out[n] = '\0';
 }
 
-bool govee_reply_segment_page_has(const uint8_t reply[GOVEE_FRAME_LEN], uint8_t r, uint8_t g, uint8_t b) {
-    if(reply[0] != GOVEE_TYPE_READ || reply[1] != GOVEE_CMD_SEGMENT_COLOR) return false;
-    /* Records start after [group]: either [bri R G B] x N or [R G B] x N. Scan
-     * every position; the probe colour is distinctive enough. */
-    for(size_t i = 3; i + 2 < GOVEE_FRAME_LEN - 1; i++) {
-        if(reply[i] == r && reply[i + 1] == g && reply[i + 2] == b) return true;
-    }
-    return false;
-}
-
 const char* govee_submode_name(uint8_t submode) {
     switch(submode) {
     case GOVEE_SUBMODE_VIDEO: return "video";

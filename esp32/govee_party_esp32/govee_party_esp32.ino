@@ -165,7 +165,6 @@ struct Light {
     GoveeDialect dialect;
     int rssi;
     GoveeAdvInfo adv;
-    uint8_t segments; /* from AA 40 once read, else 0 = unknown */
 };
 
 enum Restored { RestoredNone, RestoredPower, RestoredFull };
@@ -403,7 +402,6 @@ class ScanCallbacks : public NimBLEScanCallbacks {
         l.adv = adv;
         l.dialect = goveeDialectForLight(model, adv);
         l.rssi = dev->getRSSI();
-        l.segments = 0;
         Serial.printf(
             "found %s %s rssi %d %s pact %u/%u flags %02x%s\n",
             l.name,
@@ -826,15 +824,6 @@ static void serviceSerial() {
 
 /* ------------------------------------------------------- standalone jobs */
 
-/* Reads AA 40 once per light so the whole-strip mask fits the segment count
- * (FF 7F is only right for 15). 0 stays 0 when the light does not answer. */
-static void learnSegments(Light& l) {
-    if(l.segments || (l.dialect != GoveeRgbic && l.dialect != GoveeDreamcolor)) return;
-    uint8_t q[20], a[20];
-    goveeReadIcCount(q);
-    if(readFrame(q, a, 800) && a[4]) l.segments = a[4];
-}
-
 static void musicFrame(uint8_t f[20], uint8_t sub) {
     if(sub == GOVEE_SUBMODE_MUSIC_MODERN) {
         goveeMusicModern(f, GOVEE_MUSIC13_DEFAULT, GOVEE_MUSIC_SENSITIVITY_DEFAULT);
@@ -879,10 +868,9 @@ static void party(Light& l) {
     send(f);
     goveeBrightness(f, 100, l.dialect);
     send(f);
-    learnSegments(l);
     static const uint8_t pops[4][3] = {{255, 0, 0}, {0, 255, 0}, {0, 0, 255}, {255, 0, 255}};
     for(auto& c : pops) {
-        goveeRgbSeg(f, c[0], c[1], c[2], l.dialect, l.segments);
+        goveeRgb(f, c[0], c[1], c[2], l.dialect);
         led(c[0] / 4, c[1] / 4, c[2] / 4);
         send(f);
         delay(90);
@@ -956,7 +944,6 @@ static void rave() {
         send(f);
         goveeBrightness(f, 100, l.dialect);
         send(f);
-        learnSegments(l);
         unsigned long until = millis() + 6000;
         uint32_t tick = 0;
         while(millis() < until && raving) {
@@ -981,7 +968,7 @@ static void rave() {
                     80 + (tick % 32 < 16 ? tick % 32 : 31 - tick % 32) * 11, r, g, b);
                 break;
             }
-            goveeRgbSeg(f, r, g, b, l.dialect, l.segments);
+            goveeRgb(f, r, g, b, l.dialect);
             send(f, false);
             led(r / 3, g / 3, b / 3);
             delay(40);
@@ -1024,14 +1011,10 @@ static void censusWrite(const uint8_t f[20], const char* note) {
 static void censusProbe(CensusResult& r) {
     uint8_t q[20], a[20], f[20];
     r.probed = true;
-    uint8_t segments = (r.icKnown && r.segments) ? r.segments : 0;
     if(r.powerKnown && !r.powerOn) {
         goveePower(f, true);
         censusWrite(f, "probe");
     }
-    uint8_t page[20];
-    bool havePage = r.segmentPage;
-    if(havePage) memcpy(page, r.pageBefore, 20);
     uint8_t lastModeRgb[3] = {0, 0, 0};
     bool haveModeRgb = r.submodeKnown && goveeSubmodeIsColor(r.submode);
     if(haveModeRgb) memcpy(lastModeRgb, r.modeBody, 3);
@@ -1041,9 +1024,9 @@ static void censusProbe(CensusResult& r) {
         if(censusAbort) break;
         uint8_t want = goveeDialectSubmode(d), rgb[3];
         goveeProbeColor(d, rgb);
-        bool stalePage = havePage && goveeReplySegmentPageHas(page, rgb[0], rgb[1], rgb[2]);
         bool staleMode = haveModeRgb && memcmp(lastModeRgb, rgb, 3) == 0;
-        goveeRgbSeg(f, rgb[0], rgb[1], rgb[2], d, segments);
+        /* Reported topology does not qualify a segment-to-mask mapping. */
+        goveeRgb(f, rgb[0], rgb[1], rgb[2], d);
         censusWrite(f, "probe");
         bool echoed = false;
         goveeReadMode(q);
@@ -1055,11 +1038,8 @@ static void censusProbe(CensusResult& r) {
             memcpy(lastModeRgb, a + 3, 3);
         }
         goveeReadSegmentColors(q, 1);
-        if(censusRead(q, a, r)) {
-            if(goveeReplySegmentPageHas(a, rgb[0], rgb[1], rgb[2]) && !stalePage) echoed = true;
-            memcpy(page, a, 20);
-            havePage = true;
-        }
+        /* Keep raw page evidence; no qualified colour geometry here. */
+        censusRead(q, a, r);
         if(echoed) r.echoed |= (uint8_t)(1u << d);
         /* Back to the starting 02 / 0D state between dialects (same as govee_census.c). */
         bool restorable = r.submodeKnown && (r.submode == GOVEE_SUBMODE_COLOR_LEGACY || r.submode == GOVEE_SUBMODE_COLOR_RGBWW);
@@ -1263,7 +1243,6 @@ static void census(bool probe) {
             } else if(subscribeStatus() == nullptr) {
                 r.subscribed = true;
                 censusRun(probe, r);
-                if(r.icKnown && r.segments) l.segments = r.segments;
             }
             r.oddNotifies = oddNotifyCount;
             disconnectLight();

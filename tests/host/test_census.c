@@ -40,6 +40,7 @@ typedef struct {
     uint8_t submode; /* current mode byte */
     uint8_t rgb[3]; /* current colour (02 / 0D report it in AA 05) */
     bool has_page; /* answers AA A5 */
+    uint8_t reported_segments; /* topology must not select write masks */
     bool has_secret;
     bool corrupt_mode_reply; /* flip the checksum on AA 05 replies */
     uint16_t white_kelvin; /* 0D white state, reported with RGB 00 00 00 */
@@ -110,7 +111,7 @@ static bool fake_read(void* ctx, const uint8_t q[GOVEE_FRAME_LEN], uint8_t a[GOV
         return true;
     }
     case GOVEE_CMD_IC_NUM: {
-        uint8_t b[] = {0x00, 0x0F, 0x0F};
+        uint8_t b[] = {0x00, 0x0F, d->reported_segments};
         reply_frame(a, q[1], b, 3);
         return true;
     }
@@ -163,6 +164,7 @@ static Fake fake_speaking(GoveeDialect d) {
     f.speaks = d;
     f.power_on = true;
     f.brightness = 50;
+    f.reported_segments = 15;
     f.submode = govee_dialect_submode(d);
     f.rgb[0] = 0xAA;
     f.rgb[1] = 0xBB;
@@ -388,13 +390,14 @@ static void test_probe_echo_is_per_dialect(void) {
     CHECK(r.probed);
     CHECK(r.echoed == (1u << GoveeDialectLegacy));
 
-    /* An RGBIC light: the AA 05 reply carries no RGB, only the page does. */
+    /* An unqualified A5 page stays raw, even when it contains the colour. */
     Fake e = fake_speaking(GoveeDialectRgbic);
     io = io_for(&e);
     memset(&r, 0, sizeof(r));
     r.connected = r.subscribed = true;
     govee_census_run(&io, "H617A", true, &r);
-    CHECK(r.echoed == (1u << GoveeDialectRgbic));
+    CHECK(r.echoed == 0);
+    CHECK(r.segment_page && r.page_before[0] == GOVEE_TYPE_READ);
 
     /* A 0x0D light whose page is answered too. */
     Fake g = fake_speaking(GoveeDialectRgbww);
@@ -408,7 +411,8 @@ static void test_probe_echo_is_per_dialect(void) {
 
 static void test_probe_ignores_stale_colour(void) {
     /* The light already shows the legacy probe colour: that is not an echo. */
-    Fake d = fake_speaking(GoveeDialectRgbic);
+    Fake d = fake_speaking(GoveeDialectLegacy);
+    d.has_page = true;
     uint8_t c[3];
     govee_probe_color(GoveeDialectLegacy, c);
     memcpy(d.rgb, c, 3);
@@ -416,8 +420,28 @@ static void test_probe_ignores_stale_colour(void) {
     GoveeCensusResult r;
     memset(&r, 0, sizeof(r));
     r.connected = r.subscribed = true;
+    govee_census_run(&io, "H6159", true, &r);
+    CHECK(r.echoed == 0);
+    CHECK(r.segment_page && r.page_before[0] == GOVEE_TYPE_READ);
+}
+
+static void test_topology_does_not_select_probe_mask(void) {
+    Fake d = fake_speaking(GoveeDialectRgbic);
+    d.reported_segments = 32;
+    GoveeCensusIo io = io_for(&d);
+    GoveeCensusResult r = {0};
     govee_census_run(&io, "H617A", true, &r);
-    CHECK(r.echoed == (1u << GoveeDialectRgbic));
+    CHECK(r.ic_known && r.segments == 32); /* still preserved as evidence */
+    bool saw_rgbic = false;
+    for(int i = 0; i < d.writes && i < 32; i++) {
+        const uint8_t* f = d.written[i];
+        if(f[1] == GOVEE_CMD_MODE && f[2] == GOVEE_SUBMODE_COLOR_RGBIC) {
+            saw_rgbic = true;
+            CHECK(f[12] == 0xFF && f[13] == 0x7F);
+            CHECK(f[14] == 0 && f[15] == 0);
+        }
+    }
+    CHECK(saw_rgbic);
 }
 
 static void test_probe_restores_colour_and_power(void) {
@@ -544,7 +568,7 @@ static void test_summary_json(void) {
     CHECK(strstr(out, "\"secret_present\":true") != NULL);
     CHECK(strstr(out, "\"secret\":") == NULL); /* never without print_secret */
     CHECK(strstr(out, "deadbeef") == NULL);
-    CHECK(strstr(out, "\"echoed\":\"15\"") != NULL);
+    CHECK(strstr(out, "\"echoed\":\"\"") != NULL);
     CHECK(strstr(out, "\"restored\":\"power\"") != NULL);
     CHECK(strstr(out, "\"truncated\"") == NULL);
 
@@ -594,6 +618,7 @@ int main(void) {
     test_census_rejects_bad_checksum();
     test_probe_echo_is_per_dialect();
     test_probe_ignores_stale_colour();
+    test_topology_does_not_select_probe_mask();
     test_probe_restores_colour_and_power();
     test_white_0d_restored_verbatim();
     test_abort_stops_between_reads();
