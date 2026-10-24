@@ -94,7 +94,9 @@ jobs:
           Install from your browser: https://mezzle.github.io/govee-dance-party/
 
           ## What’s new
-          Census and evidence logging, bridge protocol v4, Fire/Candy/Aurora/Heartbeat patterns, Govee protocol fixes, and a browser installer. Update the Flipper app and bridge together.
+          BLE connection diagnostics now report the failed stage, numeric error, readable reason, and elapsed time over USB, including standalone button modes. Census saves connection and subscription failures for retrieval with DUMP. Evidence logs identify firmware 0.2.2.
+
+          This release adds diagnostics; the observed H6159 connection failure is still under investigation. Bridge protocol remains v4.
 
           Hardware validation remains in progress; see the README testing checklist.
 
