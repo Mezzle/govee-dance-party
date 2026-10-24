@@ -56,6 +56,7 @@
  */
 
 #include <NimBLEDevice.h>
+#include <NimBLEUtils.h>
 #include <LittleFS.h>
 #include "govee_frames.h"
 
@@ -112,7 +113,7 @@
 
 #define BRIDGE_BAUD 115200
 #define BRIDGE_VERSION "4"
-#define SKETCH_VERSION "0.2" /* evidence "software" field */
+#define SKETCH_VERSION "0.2.2" /* evidence "software" field */
 #define SCAN_MS 5000
 #define CONNECT_TIMEOUT_MS 6000
 #define MAX_LIGHTS 16
@@ -170,8 +171,17 @@ struct Light {
 
 enum Restored { RestoredNone, RestoredPower, RestoredFull };
 
+struct ConnectionFailure {
+    const char* stage = nullptr;
+    const char* message = nullptr;
+    int code = 0;
+    uint32_t elapsedMs = 0;
+};
+static ConnectionFailure connectionFailure;
+
 struct CensusResult {
     bool connected = false, subscribed = false, silent = false, aborted = false;
+    ConnectionFailure failure;
     bool powerKnown = false, powerOn = false;
     bool brightnessKnown = false;
     uint8_t brightness = 0;
@@ -499,33 +509,87 @@ static void ringClear() {
     portEXIT_CRITICAL(&ringMux);
 }
 
+/* NimBLE's full error text table is disabled in default Arduino builds.
+ * Keep common connection errors readable without requiring library edits. */
+static const char* bleErrorText(int code) {
+    switch(code) {
+    case 0: return "no stack error";
+    case BLE_HS_ETIMEOUT: return "operation timed out";
+    case BLE_HS_ETIMEOUT_HCI: return "controller request timed out";
+    case BLE_HS_EBUSY: return "BLE stack busy";
+    case BLE_HS_EALREADY: return "operation already in progress";
+    case BLE_HS_ENOMEM: return "not enough memory";
+    case BLE_HS_ENOTCONN: return "connection lost";
+    case BLE_HS_ENOTSYNCED: return "BLE host not synced";
+    case BLE_HS_EINVAL: return "invalid BLE parameter";
+    case BLE_HS_ENOENT: return "attribute not found";
+    case BLE_HS_EDONE: return "discovery complete";
+    case BLE_HS_EREJECT: return "request rejected";
+    case BLE_HS_EAUTHEN: return "authentication required";
+    case BLE_HS_EENCRYPT: return "encryption required";
+    case BLE_HS_HCI_ERR(BLE_ERR_CONN_ESTABLISHMENT): return "connection could not be established";
+    case BLE_HS_HCI_ERR(BLE_ERR_CONN_SPVN_TMO): return "connection supervision timeout";
+    case BLE_HS_HCI_ERR(BLE_ERR_CONN_LIMIT): return "controller connection limit reached";
+    default: {
+        const char* text = NimBLEUtils::returnCodeToString(code);
+        return text && *text ? text : "unmapped BLE error; retain numeric code";
+    }
+    }
+}
+
+static const char* connectionFailed(const NimBLEAddress& addr, const char* stage,
+                                    const char* message, int code, uint32_t started) {
+    connectionFailure = {stage, message, code, millis() - started};
+    Serial.printf("BLE failed: %s type %u stage=%s reason=%s code=%d (%s) elapsed=%lu ms\n",
+                  addr.toString().c_str(), (unsigned)addr.getType(), stage, message,
+                  code, bleErrorText(code),
+                  (unsigned long)connectionFailure.elapsedMs);
+    return message;
+}
+
 static const char* connectLight(const NimBLEAddress& addr) {
+    connectionFailure = {};
+    uint32_t started = millis();
+    Serial.printf("BLE connecting: %s type %u timeout=%u ms\n",
+                  addr.toString().c_str(), (unsigned)addr.getType(), CONNECT_TIMEOUT_MS);
     if(!client) {
         client = NimBLEDevice::createClient();
+        if(!client) return connectionFailed(addr, "client", "cannot create BLE client", 0, started);
         client->setConnectTimeout(CONNECT_TIMEOUT_MS);
         client->setConnectionParams(12, 24, 0, 200);
     }
     if(client->isConnected()) client->disconnect();
     subscribed = false;
     status = nullptr;
+    control = nullptr;
     ringClear();
     oddNotifyCount = 0;
-    if(!client->connect(addr, false, false)) return "connect failed";
+    if(!client->connect(addr, false, false))
+        return connectionFailed(addr, "connect", "connect failed", client->getLastError(), started);
     NimBLERemoteService* svc = client->getService(GOVEE_SERVICE);
-    control = svc ? svc->getCharacteristic(GOVEE_CONTROL) : nullptr;
-    status = svc ? svc->getCharacteristic(GOVEE_STATUS) : nullptr;
-    if(!control) {
+    if(!svc) {
+        int code = client->getLastError();
         client->disconnect();
-        return "no govee service";
+        return connectionFailed(addr, "service", "no govee service", code, started);
     }
+    control = svc->getCharacteristic(GOVEE_CONTROL);
+    if(!control) {
+        int code = client->getLastError();
+        client->disconnect();
+        return connectionFailed(addr, "control", "no control characteristic", code, started);
+    }
+    status = svc->getCharacteristic(GOVEE_STATUS);
     controlWithResponse = control->canWrite();
     controlWithoutResponse = control->canWriteNoResponse();
     if(!controlWithResponse && !controlWithoutResponse) {
         client->disconnect();
         control = nullptr;
         status = nullptr;
-        return "control not writable";
+        return connectionFailed(addr, "properties", "control not writable", 0, started);
     }
+    Serial.printf("BLE ready: %s elapsed=%lu ms write=%d write_no_response=%d\n",
+                  addr.toString().c_str(), (unsigned long)(millis() - started),
+                  controlWithResponse, controlWithoutResponse);
     led(0, 40, 0);
     return nullptr;
 }
@@ -1181,6 +1245,13 @@ static String censusSummary(const Light& l, const CensusResult& r, const char* a
     jsonBool(s, "secret_family", goveeNeedsSecret(l.model));
     jsonBool(s, "connected", r.connected);
     jsonBool(s, "subscribed", r.subscribed);
+    if(r.failure.stage) {
+        jsonStr(s, "error_stage", r.failure.stage);
+        jsonStr(s, "error", r.failure.message);
+        jsonRaw(s, "ble_error", String(r.failure.code));
+        jsonStr(s, "ble_error_text", bleErrorText(r.failure.code));
+        jsonRaw(s, "error_elapsed_ms", String(r.failure.elapsedMs));
+    }
     jsonBool(s, "silent", r.connected && r.silent);
     if(r.aborted) jsonBool(s, "aborted", true);
     if(r.gattKnown) {
@@ -1260,14 +1331,23 @@ static void census(bool probe) {
             if(l.adv.encrypted) {
                 /* AES-wrapped link: plaintext frames are useless. The GATT
                  * table and the 2b12 bytes are the evidence; no frames sent. */
-            } else if(subscribeStatus() == nullptr) {
-                r.subscribed = true;
-                censusRun(probe, r);
-                if(r.icKnown && r.segments) l.segments = r.segments;
+            } else {
+                uint32_t started = millis();
+                const char* err = subscribeStatus();
+                if(!err) {
+                    r.subscribed = true;
+                    censusRun(probe, r);
+                    if(r.icKnown && r.segments) l.segments = r.segments;
+                } else {
+                    connectionFailed(l.addr, "subscribe", err,
+                                     strcmp(err, "subscribe failed") == 0 ? client->getLastError() : 0, started);
+                    r.failure = connectionFailure;
+                }
             }
             r.oddNotifies = oddNotifyCount;
             disconnectLight();
         } else {
+            r.failure = connectionFailure;
             ledError();
             led(60, 40, 0);
         }

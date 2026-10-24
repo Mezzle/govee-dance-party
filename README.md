@@ -159,6 +159,17 @@ Lights advertising the encryption bit are connected to for the GATT table
 and the `2b12` bytes only; no frame is sent to them. A button press between
 lights stops a running census.
 
+Connection attempts print `BLE connecting`, then `BLE ready` or `BLE failed`
+on USB in all modes, including button-triggered Party and Rave. Failures name
+the stage (`client`, `connect`, `service`, `control`, `properties`, or census
+`subscribe`), peer address and address type, numeric BLE error, readable error
+text, and elapsed milliseconds. A zero code means no stack error was reported;
+the stage and reason still identify the missing service or unsupported property.
+Census light summaries also save `error_stage`, `error`, `ble_error`,
+`ble_error_text`, and `error_elapsed_ms` when one of these steps fails, so
+`DUMP` retains the diagnostic on ATOM Lite. These fields are absent on success.
+A timeout alone cannot distinguish a busy light from interference or range.
+
 While no USB host is attached the log is appended to LittleFS
 (`/census.jsonl`, rotated to `/census.old.jsonl` at 96 KB, older data
 dropped) and dumped the next time a host appears. Only native-USB boards
