@@ -151,8 +151,9 @@
 static const NimBLEUUID GOVEE_SERVICE(GOVEE_SERVICE_UUID_STR);
 static const NimBLEUUID GOVEE_CONTROL(GOVEE_CONTROL_UUID_STR);
 static const NimBLEUUID GOVEE_STATUS(GOVEE_STATUS_UUID_STR);
-/* BGC-info: byte 1 (lasswellt, H1270) or byte 0 (decompiled app) carries
- * encryptVersion 0 / 1 / 2. The census records the raw bytes. */
+/* BGC-info: byte 0 is the format discriminator; for format 1 (>= 2 bytes) or
+ * format 2 (>= 6 bytes) byte 1 is the encryption version (`01 00` = version 0).
+ * Short or unknown formats stay unknown. The census records the raw bytes. */
 static const NimBLEUUID GOVEE_BGC("00010203-0405-0607-0809-0a0b0c0d2b12");
 /* H6101 / H6104 use the generic UART service instead (SPEC 3.1). */
 static const NimBLEUUID GOVEE_ALT_SERVICE("0000ffe0-0000-1000-8000-00805f9b34fb");

@@ -79,7 +79,7 @@ in Govee-Bluetooth consumes (`tools/govee_report.py census.jsonl ...`).
 
 - [ ] A light with `enc 1` in `ADV`: the census connects, records `gatt` and `bgc`, sends no frame, reports `"subscribed":false`.
 - [ ] A locked `secret_family` light: `"silent":true` after exactly three timeouts (`reads:3`).
-- [ ] Record `bgc` for every such light; the second byte is where lasswellt's H1270 carried `02`, the first byte is where the decompiled app reads it. Those bytes decide the next step in Govee-Bluetooth's encrypted-protocol plan.
+- [ ] Record `bgc` for every such light. Byte 0 is the format discriminator; for format 1 (at least two bytes) or format 2 (at least six bytes), byte 1 is the encryption version, so `01 00` is version 0. Short, absent or unknown formats stay unknown. Those bytes decide the next step in Govee-Bluetooth's encrypted-protocol plan.
 
 ## 8. Hand the evidence over
 
