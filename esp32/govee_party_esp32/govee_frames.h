@@ -222,14 +222,6 @@ static inline void goveeReplyVersionString(const uint8_t rep[20], char* out, siz
     out[n] = '\0';
 }
 
-static inline bool goveeReplySegmentPageHas(const uint8_t rep[20], uint8_t r, uint8_t g, uint8_t b) {
-    if(rep[0] != GOVEE_TYPE_READ || rep[1] != GOVEE_CMD_SEGMENT_COLOR) return false;
-    for(size_t i = 3; i + 2 < 19; i++) {
-        if(rep[i] == r && rep[i + 1] == g && rep[i + 2] == b) return true;
-    }
-    return false;
-}
-
 static inline const char* goveeSubmodeName(uint8_t s) {
     switch(s) {
     case GOVEE_SUBMODE_VIDEO: return "video";
